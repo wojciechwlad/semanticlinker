@@ -175,6 +175,25 @@ $api_key_decrypted = SL_Settings::get_api_key();
 					</td>
 				</tr>
 				<tr>
+					<th scope="row"><label for="sl_max_links_per_url">Max linków / URL (klaster)</label></th>
+					<td>
+						<input
+							type="number"
+							id="sl_max_links_per_url"
+							name="max_links_per_url"
+							value="<?php echo esc_attr( $s['max_links_per_url'] ?? 10 ); ?>"
+							min="1"
+							max="50"
+							class="small-text"
+						/>
+						<p class="description">
+							Maksymalna liczba linków prowadzących do jednego URL-a (klastra) w całym serwisie (1–50).<br>
+							Dotyczy zarówno zwykłych postów jak i Custom URL-i.<br>
+							<strong>Zalecane:</strong> 10 dla równomiernego rozkładu linków.
+						</p>
+					</td>
+				</tr>
+				<tr>
 					<th scope="row"><label for="sl_cluster_threshold">Próg klastrowania anchorów</label></th>
 					<td>
 						<input
@@ -382,6 +401,7 @@ $api_key_decrypted = SL_Settings::get_api_key();
 			<input type="hidden" name="embedding_model" value="<?php echo esc_attr( $s['embedding_model'] ); ?>" />
 			<input type="hidden" name="similarity_threshold" value="<?php echo esc_attr( $s['similarity_threshold'] ); ?>" />
 			<input type="hidden" name="max_links_per_post" value="<?php echo esc_attr( $s['max_links_per_post'] ); ?>" />
+			<input type="hidden" name="max_links_per_url" value="<?php echo esc_attr( $s['max_links_per_url'] ?? 10 ); ?>" />
 			<input type="hidden" name="min_anchor_words" value="<?php echo esc_attr( $s['min_anchor_words'] ); ?>" />
 			<input type="hidden" name="max_anchor_words" value="<?php echo esc_attr( $s['max_anchor_words'] ); ?>" />
 			<input type="hidden" name="cluster_threshold" value="<?php echo esc_attr( $s['cluster_threshold'] ); ?>" />
@@ -487,10 +507,14 @@ $api_key_decrypted = SL_Settings::get_api_key();
 
 	<!-- ══════════════════════════════════════════════════════════
 	     DEBUG LOGS (full width, outside the two-column layout)
-	     Hidden in production - uncomment to enable debugging
 	     ══════════════════════════════════════════════════════════ -->
-	<div class="sl-card" style="display: none;">
-		<h2 class="sl-card-title">Debug Logs</h2>
+	<div class="sl-card">
+		<h2 class="sl-card-title" id="sl-debug-toggle" style="cursor: pointer; user-select: none;">
+			<span id="sl-debug-arrow" style="display: inline-block; transition: transform 0.2s;">▶</span>
+			Debug Logs
+			<span style="font-size: 11px; font-weight: normal; color: #666; margin-left: 10px;">(kliknij aby rozwinąć)</span>
+		</h2>
+	<div id="sl-debug-content" style="display: none;">
 		<p class="description" style="margin-bottom: 12px;">
 			Ostatnie 200 wpisów logów. Użyj przycisków do filtrowania i kopiowania.
 		</p>
@@ -573,6 +597,7 @@ $api_key_decrypted = SL_Settings::get_api_key();
 				</table>
 			<?php endif; ?>
 		</div>
-	</div>
+	</div><!-- /#sl-debug-content -->
+	</div><!-- /.sl-card (debug) -->
 
 </div><!-- .wrap -->

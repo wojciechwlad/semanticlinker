@@ -29,10 +29,19 @@ function sl_group_links_by_target_url( array $links ): array {
 				'display_anchor' => $link->anchor_text,
 				'all_anchors'    => [],
 				'links'          => [],
+				'max_score'      => 0.0,
 			];
 		}
 
 		$clusters[ $url ]['links'][] = $link;
+
+		// Track max score for the cluster (only for active links)
+		if ( $link->status === 'active' ) {
+			$score = (float) $link->similarity_score;
+			if ( $score > $clusters[ $url ]['max_score'] ) {
+				$clusters[ $url ]['max_score'] = $score;
+			}
+		}
 
 		// Collect unique anchors for this cluster
 		$anchor_lower = mb_strtolower( trim( $link->anchor_text ), 'UTF-8' );
@@ -48,18 +57,30 @@ function sl_group_links_by_target_url( array $links ): array {
 		}
 	}
 
-	// Sort clusters by display anchor
+	// Sort links within each cluster by score (highest first)
+	foreach ( $clusters as &$cluster ) {
+		usort( $cluster['links'], function( $a, $b ) {
+			return (float) $b->similarity_score <=> (float) $a->similarity_score;
+		} );
+	}
+	unset( $cluster );
+
+	// Sort clusters by max score (highest first)
 	uasort( $clusters, function( $a, $b ) {
-		return strcmp(
-			mb_strtolower( $a['display_anchor'], 'UTF-8' ),
-			mb_strtolower( $b['display_anchor'], 'UTF-8' )
-		);
+		return $b['max_score'] <=> $a['max_score'];
 	} );
 
 	return $clusters;
 }
 
 $link_clusters = sl_group_links_by_target_url( $all_links );
+
+// Get all custom URLs for marking clusters
+$custom_urls_list = SL_DB::get_all_custom_urls();
+$custom_url_set   = [];
+foreach ( $custom_urls_list as $cu ) {
+	$custom_url_set[ $cu->url ] = $cu->title;
+}
 ?>
 <div class="wrap sl-wrap">
 
@@ -94,6 +115,13 @@ $link_clusters = sl_group_links_by_target_url( $all_links );
 			if ( $l->status === 'filtered' ) $filtered_count++;
 		}
 		$cluster_count = count( $link_clusters );
+		// Count custom URL clusters
+		$custom_cluster_count = 0;
+		foreach ( $link_clusters as $url => $cluster ) {
+			if ( isset( $custom_url_set[ $url ] ) ) {
+				$custom_cluster_count++;
+			}
+		}
 		?>
 		<div class="sl-stats">
 			<span class="sl-badge sl-badge-ok">
@@ -110,6 +138,11 @@ $link_clusters = sl_group_links_by_target_url( $all_links );
 			<span class="sl-badge sl-badge-cluster">
 				<?php echo esc_html( $cluster_count ); ?> klastr<?php echo $cluster_count === 1 ? '' : ( $cluster_count >= 2 && $cluster_count <= 4 ? 'y' : 'ów' ); ?>
 			</span>
+			<?php if ( $custom_cluster_count > 0 ) : ?>
+				<span class="sl-badge sl-badge-custom">
+					<?php echo esc_html( $custom_cluster_count ); ?> custom
+				</span>
+			<?php endif; ?>
 			<label class="sl-toggle-rejected">
 				<input type="checkbox" id="sl-show-rejected" checked />
 				Pokaż odrzucone
@@ -146,12 +179,16 @@ $link_clusters = sl_group_links_by_target_url( $all_links );
 					$cluster_size   = count( $cluster_links );
 					$unique_anchors = array_values( $cluster['all_anchors'] );
 					$is_even_cluster = ( $cluster_index % 2 === 0 );
+					$is_custom_url   = isset( $custom_url_set[ $target_url ] );
 				?>
 					<!-- Cluster header row -->
-					<tr class="sl-cluster-header <?php echo $is_even_cluster ? 'sl-cluster-even' : 'sl-cluster-odd'; ?>">
+					<tr class="sl-cluster-header <?php echo $is_even_cluster ? 'sl-cluster-even' : 'sl-cluster-odd'; ?><?php echo $is_custom_url ? ' sl-cluster-custom' : ''; ?>">
 						<td colspan="6">
 							<div class="sl-cluster-info">
 								<span class="sl-cluster-label">KLASTER</span>
+								<?php if ( $is_custom_url ) : ?>
+									<span class="sl-badge sl-badge-custom" title="Custom URL: <?php echo esc_attr( $custom_url_set[ $target_url ] ); ?>">CUSTOM</span>
+								<?php endif; ?>
 								<span class="sl-cluster-anchor">
 									<?php
 									// Extract slug from URL and truncate to 5 words

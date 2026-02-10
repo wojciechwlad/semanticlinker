@@ -14,8 +14,8 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class SL_Security {
 
-	/** Rate limit: max API calls per minute. */
-	private const RATE_LIMIT_PER_MINUTE = 30;
+	/** Rate limit: max API calls per minute (increased for batch processing). */
+	private const RATE_LIMIT_PER_MINUTE = 120;
 
 	/** Rate limit transient prefix. */
 	private const RATE_LIMIT_KEY = 'sl_rate_limit_';

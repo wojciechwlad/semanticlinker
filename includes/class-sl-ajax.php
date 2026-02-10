@@ -28,6 +28,13 @@ class SL_Ajax {
 		add_action( 'wp_ajax_sl_get_debug',        [ $this, 'get_debug' ] );
 		add_action( 'wp_ajax_sl_clear_debug',      [ $this, 'clear_debug' ] );
 		add_action( 'wp_ajax_sl_fix_tables',       [ $this, 'fix_tables' ] );
+
+		// Custom URLs CRUD
+		add_action( 'wp_ajax_sl_add_custom_url',    [ $this, 'add_custom_url' ] );
+		add_action( 'wp_ajax_sl_update_custom_url', [ $this, 'update_custom_url' ] );
+		add_action( 'wp_ajax_sl_delete_custom_url', [ $this, 'delete_custom_url' ] );
+		add_action( 'wp_ajax_sl_get_custom_urls',   [ $this, 'get_custom_urls' ] );
+		add_action( 'wp_ajax_sl_save_custom_url_threshold', [ $this, 'save_custom_url_threshold' ] );
 	}
 
 	/* ── Reject / blacklist ─────────────────────────────────────── */
@@ -211,6 +218,179 @@ class SL_Ajax {
 		SL_Debug::log( 'ajax', 'Indexing cancelled by user' );
 
 		wp_send_json_success( [ 'message' => 'Proces anulowany.' ] );
+	}
+
+	/* ── Custom URLs CRUD ──────────────────────────────────────── */
+
+	/**
+	 * Add a new custom URL.
+	 */
+	public function add_custom_url(): void {
+		$this->verify();
+
+		$url      = isset( $_POST['url'] ) ? esc_url_raw( wp_unslash( $_POST['url'] ) ) : '';
+		$title    = isset( $_POST['title'] ) ? sanitize_text_field( wp_unslash( $_POST['title'] ) ) : '';
+		$keywords = isset( $_POST['keywords'] ) ? sanitize_textarea_field( wp_unslash( $_POST['keywords'] ) ) : '';
+
+		if ( empty( $url ) || empty( $title ) ) {
+			wp_send_json_error( 'URL i tytuł są wymagane.' );
+		}
+
+		if ( ! filter_var( $url, FILTER_VALIDATE_URL ) ) {
+			wp_send_json_error( 'Nieprawidłowy format URL.' );
+		}
+
+		if ( SL_DB::custom_url_exists( $url ) ) {
+			wp_send_json_error( 'Ten URL już istnieje.' );
+		}
+
+		$count = SL_DB::get_custom_url_count();
+		if ( $count >= SL_DB::MAX_CUSTOM_URLS ) {
+			wp_send_json_error( 'Osiągnięto limit ' . SL_DB::MAX_CUSTOM_URLS . ' URL-i.' );
+		}
+
+		$id = SL_DB::insert_custom_url( [
+			'url'      => $url,
+			'title'    => $title,
+			'keywords' => $keywords,
+		] );
+
+		if ( ! $id ) {
+			wp_send_json_error( 'Nie udało się dodać URL.' );
+		}
+
+		// Generate embedding for the new custom URL
+		$this->generate_custom_url_embedding( $id, $title, $keywords );
+
+		wp_send_json_success( [
+			'message' => 'URL dodany.',
+			'id'      => $id,
+			'count'   => SL_DB::get_custom_url_count(),
+		] );
+	}
+
+	/**
+	 * Update an existing custom URL.
+	 */
+	public function update_custom_url(): void {
+		$this->verify();
+
+		$id       = isset( $_POST['id'] ) ? absint( $_POST['id'] ) : 0;
+		$url      = isset( $_POST['url'] ) ? esc_url_raw( wp_unslash( $_POST['url'] ) ) : '';
+		$title    = isset( $_POST['title'] ) ? sanitize_text_field( wp_unslash( $_POST['title'] ) ) : '';
+		$keywords = isset( $_POST['keywords'] ) ? sanitize_textarea_field( wp_unslash( $_POST['keywords'] ) ) : '';
+
+		if ( $id < 1 ) {
+			wp_send_json_error( 'Nieprawidłowy identyfikator.' );
+		}
+
+		if ( empty( $url ) || empty( $title ) ) {
+			wp_send_json_error( 'URL i tytuł są wymagane.' );
+		}
+
+		$existing = SL_DB::get_custom_url( $id );
+		if ( ! $existing ) {
+			wp_send_json_error( 'URL nie znaleziony.' );
+		}
+
+		$ok = SL_DB::update_custom_url( $id, [
+			'url'      => $url,
+			'title'    => $title,
+			'keywords' => $keywords,
+		] );
+
+		if ( ! $ok ) {
+			wp_send_json_error( 'Nie udało się zaktualizować URL (może istnieje duplikat).' );
+		}
+
+		// Regenerate embedding if title or keywords changed
+		if ( $existing->title !== $title || $existing->keywords !== $keywords ) {
+			$this->generate_custom_url_embedding( $id, $title, $keywords );
+		}
+
+		wp_send_json_success( [ 'message' => 'URL zaktualizowany.' ] );
+	}
+
+	/**
+	 * Delete a custom URL.
+	 */
+	public function delete_custom_url(): void {
+		$this->verify();
+
+		$id = isset( $_POST['id'] ) ? absint( $_POST['id'] ) : 0;
+
+		if ( $id < 1 ) {
+			wp_send_json_error( 'Nieprawidłowy identyfikator.' );
+		}
+
+		$ok = SL_DB::delete_custom_url( $id );
+
+		if ( ! $ok ) {
+			wp_send_json_error( 'Nie udało się usunąć URL.' );
+		}
+
+		wp_send_json_success( [
+			'message' => 'URL usunięty.',
+			'count'   => SL_DB::get_custom_url_count(),
+		] );
+	}
+
+	/**
+	 * Get all custom URLs (for AJAX refresh).
+	 */
+	public function get_custom_urls(): void {
+		$this->verify();
+
+		$urls = SL_DB::get_all_custom_urls();
+
+		wp_send_json_success( [
+			'urls'  => $urls,
+			'count' => count( $urls ),
+			'max'   => SL_DB::MAX_CUSTOM_URLS,
+		] );
+	}
+
+	/**
+	 * Save custom URL similarity threshold.
+	 */
+	public function save_custom_url_threshold(): void {
+		$this->verify();
+
+		$threshold = isset( $_POST['threshold'] ) ? (float) $_POST['threshold'] : 0.5;
+
+		// Clamp to valid range [0.20 … 0.90]
+		$threshold = max( 0.20, min( 0.90, $threshold ) );
+
+		// Get current settings and update
+		$settings = get_option( SL_Settings::OPTION_KEY, [] );
+		$settings['custom_url_threshold'] = $threshold;
+		update_option( SL_Settings::OPTION_KEY, $settings );
+
+		wp_send_json_success( [
+			'message'   => 'Próg zapisany.',
+			'threshold' => $threshold,
+		] );
+	}
+
+	/**
+	 * Generate embedding for a custom URL.
+	 *
+	 * @param int    $id       Custom URL ID.
+	 * @param string $title    Title text.
+	 * @param string $keywords Keywords text.
+	 */
+	private function generate_custom_url_embedding( int $id, string $title, string $keywords ): void {
+		$text = $title;
+		if ( ! empty( $keywords ) ) {
+			$text .= ' ' . $keywords;
+		}
+
+		$api       = new SL_Embedding_API();
+		$embedding = $api->embed_single( $text );
+
+		if ( $embedding ) {
+			SL_DB::update_custom_url_embedding( $id, $embedding );
+		}
 	}
 
 	/* ── Guard ──────────────────────────────────────────────────── */

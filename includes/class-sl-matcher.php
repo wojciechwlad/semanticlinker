@@ -51,6 +51,14 @@ class SL_Matcher {
 	private const CLUSTER_THRESHOLD = 0.75;
 
 	/**
+	 * Default minimum similarity threshold for custom URLs.
+	 * Custom URLs use a lower threshold because the user explicitly
+	 * added them, so they should be matched more aggressively.
+	 * This default can be overridden via the 'custom_url_threshold' setting.
+	 */
+	private const CUSTOM_URL_DEFAULT_THRESHOLD = 0.65;
+
+	/**
 	 * Common Polish word endings to strip for basic stemming/normalization.
 	 * Used as fallback when embedding-based clustering is not available.
 	 */
@@ -82,6 +90,15 @@ class SL_Matcher {
 		'the', 'and', 'for', 'with', 'that', 'this', 'from',
 		'are', 'was', 'has', 'have', 'will', 'your', 'can', 'about',
 	];
+
+	/**
+	 * Get the custom URL similarity threshold from settings.
+	 *
+	 * @return float  Threshold value between 0.20 and 0.90.
+	 */
+	private static function get_custom_url_threshold(): float {
+		return (float) SL_Settings::get( 'custom_url_threshold', self::CUSTOM_URL_DEFAULT_THRESHOLD );
+	}
 
 	/**
 	 * Polish conjunctions, prepositions, and short verbs that should not appear
@@ -119,6 +136,9 @@ class SL_Matcher {
 			'threshold' => $threshold,
 		] );
 
+		/* Preload URL links cache (one query instead of thousands) */
+		SL_DB::preload_url_links_cache();
+
 		/* Target set = title embeddings of every indexed post */
 		$title_rows = SL_DB::get_title_embeddings();
 
@@ -130,13 +150,31 @@ class SL_Matcher {
 		}
 
 		/* Index by post_id for O(1) lookup */
-		$target_map = [];     // post_id => [ 'vec' => float[], 'title' => string ]
+		$target_map = [];     // post_id => [ 'vec' => float[], 'title' => string, 'target_type' => 'post'|'custom' ]
 		foreach ( $title_rows as $row ) {
 			$target_map[$row->post_id] = [
-				'vec'   => $row->embedding,
-				'title' => $row->chunk_text,
+				'vec'         => $row->embedding,
+				'title'       => $row->chunk_text,
+				'target_type' => 'post',
 			];
 		}
+
+		/* Add custom URLs to target map */
+		$custom_urls = SL_DB::get_custom_url_embeddings();
+		foreach ( $custom_urls as $custom ) {
+			$custom_key = 'custom_' . $custom->ID;
+			$target_map[ $custom_key ] = [
+				'vec'         => $custom->embedding,
+				'title'       => $custom->title,
+				'target_type' => 'custom',
+				'url'         => $custom->url,
+			];
+		}
+
+		SL_Debug::log( 'matcher', 'Custom URLs loaded into target map', [
+			'count'  => count( $custom_urls ),
+			'titles' => array_map( fn( $u ) => $u->title, $custom_urls ),
+		] );
 
 		$total_candidates_found = 0;
 		$total_links_created = 0;
@@ -251,11 +289,17 @@ class SL_Matcher {
 						$scores_above_half++;
 					}
 
-					if ( $score >= $threshold ) {
+					// Custom URLs use a much lower threshold (user explicitly added them)
+					$is_custom = ( $target['target_type'] ?? 'post' ) === 'custom';
+					$effective_threshold = $is_custom ? self::get_custom_url_threshold() : $threshold;
+
+					if ( $score >= $effective_threshold ) {
 						$candidates[] = [
 							'chunk'        => $chunk->chunk_text,
 							'target_id'    => $tid,
 							'target_title' => $target['title'],
+							'target_type'  => $target['target_type'] ?? 'post',
+							'target_url'   => $target['url'] ?? null,  // Pre-filled for custom URLs
 							'score'        => $score,
 						];
 						$total_candidates_found++;
@@ -279,8 +323,13 @@ class SL_Matcher {
 				continue;
 			}
 
-			/* Sort descending so highest-confidence matches are tried first */
+			/* Sort: custom URLs first (priority), then by score descending */
 			usort( $candidates, function ( $a, $b ) {
+				$a_custom = ( $a['target_type'] ?? 'post' ) === 'custom' ? 1 : 0;
+				$b_custom = ( $b['target_type'] ?? 'post' ) === 'custom' ? 1 : 0;
+				if ( $a_custom !== $b_custom ) {
+					return $b_custom <=> $a_custom;  // Custom first
+				}
 				return $b['score'] <=> $a['score'];
 			} );
 
@@ -299,7 +348,14 @@ class SL_Matcher {
 					continue;
 				}
 
-				$permalink = get_permalink( $c['target_id'] );
+				$is_custom = ( $c['target_type'] ?? 'post' ) === 'custom';
+
+				// Get permalink: use pre-filled URL for custom, get_permalink for posts
+				if ( $is_custom ) {
+					$permalink = $c['target_url'];
+				} else {
+					$permalink = get_permalink( $c['target_id'] );
+				}
 				if ( ! $permalink ) {
 					continue;
 				}
@@ -314,8 +370,16 @@ class SL_Matcher {
 					continue;
 				}
 
-				/* Skip if same-category-only is enabled and posts don't share a category */
-				if ( SL_Settings::get( 'same_category_only', true ) ) {
+				/* Skip if this target URL already has max links (cluster limit)
+				 * Cache is preloaded at start and updated after each insert */
+				$max_links_per_url = (int) SL_Settings::get( 'max_links_per_url', 10 );
+				if ( SL_DB::get_active_links_to_url( $permalink ) >= $max_links_per_url ) {
+					continue;
+				}
+
+				/* Skip if same-category-only is enabled and posts don't share a category
+				 * Custom URLs are exempt (they don't have categories) */
+				if ( ! $is_custom && SL_Settings::get( 'same_category_only', true ) ) {
 					if ( ! self::posts_share_category( $src_id, $c['target_id'] ) ) {
 						continue;
 					}
@@ -406,8 +470,10 @@ class SL_Matcher {
 				/* Determine link status (active or filtered by Gemini) */
 				$link_status = 'active';
 
-				/* Optional Gemini AI filter: verify anchor-title contextual match */
-				if ( SL_Settings::get( 'gemini_anchor_filter', false ) ) {
+				/* Optional Gemini AI filter: verify anchor-title contextual match
+				 * Note: Custom URLs bypass Gemini filter (they're manually curated) */
+				$is_custom_target = ( $c['target_type'] ?? 'post' ) === 'custom';
+				if ( ! $is_custom_target && SL_Settings::get( 'gemini_anchor_filter', false ) ) {
 					$api = new SL_Embedding_API();
 					if ( ! $api->evaluate_anchor_match( $anchor, $c['target_title'] ) ) {
 						SL_Debug::log( 'matcher', 'Gemini filter rejected anchor-title pair', [
@@ -423,7 +489,7 @@ class SL_Matcher {
 					'post_id'          => $src_id,
 					'anchor_text'      => $anchor,
 					'target_url'       => $permalink,
-					'target_post_id'   => $c['target_id'],
+					'target_post_id'   => $is_custom_target ? 0 : $c['target_id'],  // 0 for custom URLs
 					'similarity_score' => round( $c['score'], 4 ),
 					'status'           => $link_status,
 				] );
@@ -435,6 +501,8 @@ class SL_Matcher {
 
 					if ( $link_status === 'active' ) {
 						$total_links_created++;
+						// Update URL links cache (for cluster limit enforcement)
+						SL_DB::increment_url_links_cache( $permalink );
 						// Flush the frontend injection cache for this source post
 						delete_transient( 'sl_inj_' . $src_id );
 					} else {
@@ -571,6 +639,9 @@ class SL_Matcher {
 			'note'             => 'Embeddings will be computed on-the-fly',
 		] );
 
+		// Preload URL links cache (one query instead of thousands per batch)
+		SL_DB::preload_url_links_cache();
+
 		// Phase: Gemini filtering
 		if ( $progress['phase'] === 'filtering' ) {
 			return self::process_gemini_batch( $progress );
@@ -593,15 +664,43 @@ class SL_Matcher {
 		$threshold  = (float) SL_Settings::get( 'similarity_threshold', 0.85 );
 		$excluded_ids = SL_Settings::get( 'excluded_post_ids', [] );
 
-		// Load target map
+		// Load target map (posts)
 		$title_rows = SL_DB::get_title_embeddings();
 		$target_map = [];
 		foreach ( $title_rows as $row ) {
 			$target_map[ $row->post_id ] = [
-				'vec'   => $row->embedding,
-				'title' => $row->chunk_text,
+				'vec'         => $row->embedding,
+				'title'       => $row->chunk_text,
+				'target_type' => 'post',
 			];
 		}
+
+		// Load custom URLs into target map
+		$custom_urls = SL_DB::get_custom_url_embeddings();
+		foreach ( $custom_urls as $custom ) {
+			$custom_key = 'custom_' . $custom->ID;
+			$has_valid_embedding = is_array( $custom->embedding ) && count( $custom->embedding ) > 0;
+			$target_map[ $custom_key ] = [
+				'vec'         => $custom->embedding,
+				'title'       => $custom->title,
+				'target_type' => 'custom',
+				'url'         => $custom->url,
+			];
+			// Debug each custom URL
+			SL_Debug::log( 'matcher', 'Custom URL added to target map', [
+				'id'              => $custom->ID,
+				'title'           => $custom->title,
+				'url'             => $custom->url,
+				'has_embedding'   => $has_valid_embedding ? 'yes' : 'NO!',
+				'embedding_dim'   => $has_valid_embedding ? count( $custom->embedding ) : 0,
+			] );
+		}
+
+		// Debug: Log custom URLs summary
+		SL_Debug::log( 'matcher', 'Batch: Custom URLs loaded summary', [
+			'count'  => count( $custom_urls ),
+			'titles' => array_map( fn( $u ) => $u->title, $custom_urls ),
+		] );
 
 		// Get batch of source IDs
 		$batch_ids = array_slice(
@@ -646,17 +745,30 @@ class SL_Matcher {
 					}
 				}
 
+				$max_links_per_url = (int) SL_Settings::get( 'max_links_per_url', 10 );
+
 				foreach ( $progress['candidates'] as $candidate ) {
 					$anchor_normalized = mb_strtolower( trim( $candidate['anchor'] ), 'UTF-8' );
+					$target_url = $candidate['target_url'];
+
+					// Skip if this URL already reached max links limit (cache handles tracking)
+					if ( SL_DB::get_active_links_to_url( $target_url ) >= $max_links_per_url ) {
+						SL_Debug::log( 'matcher', 'Direct save: URL reached max links limit - skipping', [
+							'source_id'  => $candidate['source_id'],
+							'target_url' => $target_url,
+							'limit'      => $max_links_per_url,
+						] );
+						continue;
+					}
 
 					// Skip if anchor already used for different URL
 					if ( isset( $anchor_url_map[ $anchor_normalized ] ) &&
-					     $anchor_url_map[ $anchor_normalized ] !== $candidate['target_url'] ) {
+					     $anchor_url_map[ $anchor_normalized ] !== $target_url ) {
 						SL_Debug::log( 'matcher', 'Direct save: anchor conflict - skipping', [
 							'source_id'    => $candidate['source_id'],
 							'anchor'       => $candidate['anchor'],
 							'existing_url' => $anchor_url_map[ $anchor_normalized ],
-							'new_url'      => $candidate['target_url'],
+							'new_url'      => $target_url,
 						] );
 						continue;
 					}
@@ -664,25 +776,27 @@ class SL_Matcher {
 					$inserted = SL_DB::insert_link( [
 						'post_id'          => $candidate['source_id'],
 						'anchor_text'      => $candidate['anchor'],
-						'target_url'       => $candidate['target_url'],
+						'target_url'       => $target_url,
 						'target_post_id'   => $candidate['target_id'],
 						'similarity_score' => round( $candidate['score'], 4 ),
 						'status'           => 'active',
 					] );
 					if ( $inserted ) {
-						$anchor_url_map[ $anchor_normalized ] = $candidate['target_url'];
+						$anchor_url_map[ $anchor_normalized ] = $target_url;
 						$progress['links_created']++;
+						// Update URL links cache
+						SL_DB::increment_url_links_cache( $target_url );
 						delete_transient( 'sl_inj_' . $candidate['source_id'] );
 						SL_Debug::log( 'matcher', 'Link saved (direct)', [
 							'source_id'  => $candidate['source_id'],
 							'anchor'     => $candidate['anchor'],
-							'target_url' => $candidate['target_url'],
+							'target_url' => $target_url,
 						] );
 					} else {
 						SL_Debug::log( 'matcher', 'Failed to save link (direct)', [
 							'source_id'  => $candidate['source_id'],
 							'anchor'     => $candidate['anchor'],
-							'target_url' => $candidate['target_url'],
+							'target_url' => $target_url,
 						] );
 					}
 				}
@@ -778,6 +892,7 @@ class SL_Matcher {
 
 			// Score every (chunk × target) pair
 			$candidates = [];
+			$custom_max_scores = [];  // Track max score for each custom URL
 
 			foreach ( $content_chunks as $chunk ) {
 				foreach ( $target_map as $tid => $target ) {
@@ -790,25 +905,64 @@ class SL_Matcher {
 
 					$score = self::cosine( $chunk->embedding, $target['vec'] );
 
-					if ( $score >= $threshold ) {
+					// Track max score for custom URLs
+					$is_custom = ( $target['target_type'] ?? 'post' ) === 'custom';
+					if ( $is_custom ) {
+						$title = $target['title'];
+						if ( ! isset( $custom_max_scores[ $title ] ) || $score > $custom_max_scores[ $title ] ) {
+							$custom_max_scores[ $title ] = $score;
+						}
+					}
+
+					// Custom URLs use a much lower threshold (user explicitly added them)
+					$effective_threshold = $is_custom ? self::get_custom_url_threshold() : $threshold;
+
+					if ( $score >= $effective_threshold ) {
 						$candidates[] = [
 							'chunk'        => $chunk->chunk_text,
 							'target_id'    => $tid,
 							'target_title' => $target['title'],
+							'target_type'  => $target['target_type'] ?? 'post',
+							'target_url'   => $target['url'] ?? null,  // Pre-filled for custom URLs
 							'score'        => $score,
 						];
 					}
 				}
 			}
 
+			// Log max scores for all custom URLs (even those below threshold)
+			if ( ! empty( $custom_max_scores ) ) {
+				SL_Debug::log( 'matcher', 'Custom URLs max scores for source', [
+					'source_id'         => $src_id,
+					'post_threshold'    => $threshold,
+					'custom_threshold'  => self::get_custom_url_threshold(),
+					'max_scores'        => array_map( fn( $s ) => round( $s, 4 ), $custom_max_scores ),
+				] );
+			}
+
 			if ( empty( $candidates ) ) {
 				continue;
 			}
 
-			// Sort descending
+			// Sort: custom URLs first (priority), then by score descending
 			usort( $candidates, function ( $a, $b ) {
+				$a_custom = ( $a['target_type'] ?? 'post' ) === 'custom' ? 1 : 0;
+				$b_custom = ( $b['target_type'] ?? 'post' ) === 'custom' ? 1 : 0;
+				if ( $a_custom !== $b_custom ) {
+					return $b_custom <=> $a_custom;  // Custom first
+				}
 				return $b['score'] <=> $a['score'];
 			} );
+
+			// Log custom URL candidates for debugging
+			$custom_candidates = array_filter( $candidates, fn( $c ) => ( $c['target_type'] ?? 'post' ) === 'custom' );
+			if ( ! empty( $custom_candidates ) ) {
+				SL_Debug::log( 'matcher', 'Custom URL candidates found', [
+					'source_id'        => $src_id,
+					'custom_count'     => count( $custom_candidates ),
+					'total_candidates' => count( $candidates ),
+				] );
+			}
 
 			// ═══════════════════════════════════════════════════════════════════
 			// PHASE 1: Collect pre-candidates (before embedding)
@@ -819,28 +973,82 @@ class SL_Matcher {
 			$pre_candidates = [];  // Candidates that pass basic checks, pending embedding
 
 			foreach ( $candidates as $c ) {
+				$is_custom = ( $c['target_type'] ?? 'post' ) === 'custom';
+
 				if ( $remaining <= 0 ) {
+					if ( $is_custom ) {
+						SL_Debug::log( 'matcher', 'CUSTOM SKIP: no remaining slots', [
+							'source_id'    => $src_id,
+							'target_title' => $c['target_title'],
+							'remaining'    => $remaining,
+						] );
+					}
 					break;
 				}
 
 				if ( in_array( $c['target_id'], $used_targets, true ) ) {
+					if ( $is_custom ) {
+						SL_Debug::log( 'matcher', 'CUSTOM SKIP: target already used', [
+							'source_id'    => $src_id,
+							'target_title' => $c['target_title'],
+						] );
+					}
 					continue;
 				}
 
-				$permalink = get_permalink( $c['target_id'] );
+				// Get permalink: use pre-filled URL for custom, get_permalink for posts
+				if ( $is_custom ) {
+					$permalink = $c['target_url'];
+				} else {
+					$permalink = get_permalink( $c['target_id'] );
+				}
 				if ( ! $permalink ) {
+					if ( $is_custom ) {
+						SL_Debug::log( 'matcher', 'CUSTOM SKIP: no permalink', [
+							'source_id'    => $src_id,
+							'target_title' => $c['target_title'],
+						] );
+					}
 					continue;
 				}
 
 				if ( SL_DB::link_exists_for_post( $src_id, $permalink ) ) {
+					if ( $is_custom ) {
+						SL_Debug::log( 'matcher', 'CUSTOM SKIP: link already exists', [
+							'source_id'    => $src_id,
+							'target_title' => $c['target_title'],
+							'target_url'   => $permalink,
+						] );
+					}
 					continue;
 				}
 
 				if ( SL_DB::is_blacklisted( $src_id, $permalink ) ) {
+					if ( $is_custom ) {
+						SL_Debug::log( 'matcher', 'CUSTOM SKIP: blacklisted', [
+							'source_id'    => $src_id,
+							'target_title' => $c['target_title'],
+						] );
+					}
 					continue;
 				}
 
-				if ( SL_Settings::get( 'same_category_only', true ) ) {
+				// Skip if this target URL already has max links (cache handles tracking)
+				$max_links_per_url = (int) SL_Settings::get( 'max_links_per_url', 10 );
+				if ( SL_DB::get_active_links_to_url( $permalink ) >= $max_links_per_url ) {
+					if ( $is_custom ) {
+						SL_Debug::log( 'matcher', 'CUSTOM SKIP: URL reached max links limit', [
+							'source_id'    => $src_id,
+							'target_title' => $c['target_title'],
+							'target_url'   => $permalink,
+							'limit'        => $max_links_per_url,
+						] );
+					}
+					continue;
+				}
+
+				// Skip same_category_only check for custom URLs (they don't have categories)
+				if ( ! $is_custom && SL_Settings::get( 'same_category_only', true ) ) {
 					if ( ! self::posts_share_category( $src_id, $c['target_id'] ) ) {
 						continue;
 					}
@@ -849,24 +1057,57 @@ class SL_Matcher {
 				// Anchor extraction
 				$anchor = self::find_anchor( $c['chunk'], $c['target_title'] );
 				if ( ! $anchor || mb_strlen( $anchor, 'UTF-8' ) < 3 ) {
+					if ( $is_custom ) {
+						SL_Debug::log( 'matcher', 'CUSTOM SKIP: no anchor found', [
+							'source_id'    => $src_id,
+							'target_title' => $c['target_title'],
+							'chunk'        => mb_substr( $c['chunk'], 0, 100, 'UTF-8' ) . '...',
+						] );
+					}
 					continue;
 				}
 
 				// Skip if this anchor is already used for a different target in this source post
 				$anchor_lower = mb_strtolower( $anchor, 'UTF-8' );
 				if ( isset( $used_anchors[ $anchor_lower ] ) && $used_anchors[ $anchor_lower ] !== $permalink ) {
+					if ( $is_custom ) {
+						SL_Debug::log( 'matcher', 'CUSTOM SKIP: anchor already used for different URL', [
+							'source_id'    => $src_id,
+							'target_title' => $c['target_title'],
+							'anchor'       => $anchor,
+							'existing_url' => $used_anchors[ $anchor_lower ],
+						] );
+					}
 					continue;
 				}
 
 				// Check if anchor can be injected (not only in excluded tags)
 				if ( ! self::anchor_can_be_injected( $src_id, $anchor ) ) {
+					if ( $is_custom ) {
+						SL_Debug::log( 'matcher', 'CUSTOM SKIP: anchor cannot be injected', [
+							'source_id'    => $src_id,
+							'target_title' => $c['target_title'],
+							'anchor'       => $anchor,
+						] );
+					}
 					continue;
+				}
+
+				// Debug: custom URL passed all filters
+				if ( $is_custom ) {
+					SL_Debug::log( 'matcher', 'CUSTOM PASSED: adding to pre-candidates', [
+						'source_id'    => $src_id,
+						'target_title' => $c['target_title'],
+						'anchor'       => $anchor,
+						'score'        => round( $c['score'], 4 ),
+					] );
 				}
 
 				// Add to pre-candidates for batch embedding
 				$pre_candidates[] = [
 					'source_id'    => $src_id,
-					'target_id'    => $c['target_id'],
+					'target_id'    => $is_custom ? 0 : $c['target_id'],  // 0 for custom URLs
+					'target_type'  => $c['target_type'] ?? 'post',
 					'target_title' => $c['target_title'],
 					'anchor'       => $anchor,
 					'anchor_lower' => $anchor_lower,
@@ -997,6 +1238,7 @@ class SL_Matcher {
 				$new_candidates[] = [
 					'source_id'    => $pc['source_id'],
 					'target_id'    => $pc['target_id'],
+					'target_type'  => $pc['target_type'] ?? 'post',
 					'target_title' => $pc['target_title'],
 					'anchor'       => $anchor,
 					'target_url'   => $permalink,
@@ -1135,17 +1377,42 @@ class SL_Matcher {
 				continue;
 			}
 
-			$is_match = $api->evaluate_anchor_match(
-				$candidate['anchor'],
-				$candidate['target_title']
-			);
+			/* Custom URLs bypass Gemini filter (they're manually curated) */
+			$is_custom_target = ( $candidate['target_type'] ?? 'post' ) === 'custom';
+			if ( $is_custom_target ) {
+				$is_match = true;
+				SL_Debug::log( 'matcher', 'Custom URL: bypassing Gemini filter', [
+					'source_id'    => $candidate['source_id'],
+					'anchor'       => $candidate['anchor'],
+					'target_url'   => $candidate['target_url'],
+				] );
+			} else {
+				$is_match = $api->evaluate_anchor_match(
+					$candidate['anchor'],
+					$candidate['target_title']
+				);
+			}
 
 			$status = $is_match ? 'active' : 'filtered';
+
+			// Skip if this URL already reached max links limit (only for active links)
+			$target_url = $candidate['target_url'];
+			if ( $is_match ) {
+				$max_links_per_url = (int) SL_Settings::get( 'max_links_per_url', 10 );
+				if ( SL_DB::get_active_links_to_url( $target_url ) >= $max_links_per_url ) {
+					SL_Debug::log( 'matcher', 'Gemini phase: URL reached max links limit - skipping', [
+						'source_id'  => $candidate['source_id'],
+						'target_url' => $target_url,
+						'limit'      => $max_links_per_url,
+					] );
+					continue;
+				}
+			}
 
 			$inserted = SL_DB::insert_link( [
 				'post_id'          => $candidate['source_id'],
 				'anchor_text'      => $candidate['anchor'],
-				'target_url'       => $candidate['target_url'],
+				'target_url'       => $target_url,
 				'target_post_id'   => $candidate['target_id'],
 				'similarity_score' => round( $candidate['score'], 4 ),
 				'status'           => $status,
@@ -1153,12 +1420,14 @@ class SL_Matcher {
 
 			if ( $inserted ) {
 				// Track this anchor for deduplication within batch
-				$batch_saved_anchors[ $anchor_normalized ] = $candidate['target_url'];
+				$batch_saved_anchors[ $anchor_normalized ] = $target_url;
 				// Also update in-memory map for subsequent iterations
-				$anchor_url_map[ $anchor_normalized ] = $candidate['target_url'];
+				$anchor_url_map[ $anchor_normalized ] = $target_url;
 
 				if ( $is_match ) {
 					$progress['links_created']++;
+					// Update URL links cache
+					SL_DB::increment_url_links_cache( $target_url );
 					delete_transient( 'sl_inj_' . $candidate['source_id'] );
 				} else {
 					$progress['links_filtered']++;

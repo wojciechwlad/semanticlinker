@@ -564,6 +564,212 @@
 			} );
 		} );
 
+		/* ── 5. Custom URLs CRUD ───────────────────────────────────── */
+
+		// Add new custom URL
+		$( '#sl-btn-add-custom-url' ).on( 'click', function() {
+			var $btn      = $( this );
+			var $url      = $( '#sl-custom-url' );
+			var $title    = $( '#sl-custom-title' );
+			var $keywords = $( '#sl-custom-keywords' );
+
+			var url      = $url.val().trim();
+			var title    = $title.val().trim();
+			var keywords = $keywords.val().trim();
+
+			if ( ! url || ! title ) {
+				showNotice( 'error', 'URL i tytuł są wymagane.' );
+				return;
+			}
+
+			$btn.prop( 'disabled', true ).text( 'Dodawanie...' );
+
+			$.ajax( {
+				url  : slAjax.url,
+				type : 'POST',
+				data : {
+					action   : 'sl_add_custom_url',
+					nonce    : slAjax.nonce,
+					url      : url,
+					title    : title,
+					keywords : keywords
+				},
+				success : function( res ) {
+					if ( res.success ) {
+						showNotice( 'success', res.data.message );
+						// Clear form
+						$url.val( '' );
+						$title.val( '' );
+						$keywords.val( '' );
+						// Update counter
+						$( '#sl-custom-url-count' ).text( res.data.count );
+						// Reload page to show new URL
+						location.reload();
+					} else {
+						showNotice( 'error', res.data );
+						$btn.prop( 'disabled', false ).text( 'Dodaj URL' );
+					}
+				},
+				error : function() {
+					showNotice( 'error', 'Błąd serwera – spróbuj ponownie.' );
+					$btn.prop( 'disabled', false ).text( 'Dodaj URL' );
+				}
+			} );
+		} );
+
+		// Delete custom URL
+		$( document ).on( 'click', '.sl-btn-delete-custom-url', function() {
+			var $btn = $( this );
+			var id   = $btn.data( 'id' );
+
+			if ( ! window.confirm( 'Usunąć ten URL?' ) ) {
+				return;
+			}
+
+			$btn.prop( 'disabled', true ).text( '...' );
+
+			$.ajax( {
+				url  : slAjax.url,
+				type : 'POST',
+				data : {
+					action : 'sl_delete_custom_url',
+					nonce  : slAjax.nonce,
+					id     : id
+				},
+				success : function( res ) {
+					if ( res.success ) {
+						$btn.closest( 'tr' ).fadeOut( 300, function() {
+							$( this ).remove();
+						} );
+						$( '#sl-custom-url-count' ).text( res.data.count );
+						showNotice( 'success', res.data.message );
+					} else {
+						showNotice( 'error', res.data );
+						$btn.prop( 'disabled', false ).text( 'Usuń' );
+					}
+				},
+				error : function() {
+					showNotice( 'error', 'Błąd serwera – spróbuj ponownie.' );
+					$btn.prop( 'disabled', false ).text( 'Usuń' );
+				}
+			} );
+		} );
+
+		// Edit custom URL - toggle edit mode
+		$( document ).on( 'click', '.sl-btn-edit-custom-url', function() {
+			var $row = $( this ).closest( 'tr' );
+			$row.find( '.sl-custom-url-view' ).hide();
+			$row.find( '.sl-custom-url-edit' ).show();
+		} );
+
+		// Cancel edit
+		$( document ).on( 'click', '.sl-btn-cancel-edit', function() {
+			var $row = $( this ).closest( 'tr' );
+			$row.find( '.sl-custom-url-edit' ).hide();
+			$row.find( '.sl-custom-url-view' ).show();
+		} );
+
+		// Save edited custom URL
+		$( document ).on( 'click', '.sl-btn-save-custom-url', function() {
+			var $btn  = $( this );
+			var $row  = $btn.closest( 'tr' );
+			var id    = $btn.data( 'id' );
+
+			var url      = $row.find( '.sl-edit-url' ).val().trim();
+			var title    = $row.find( '.sl-edit-title' ).val().trim();
+			var keywords = $row.find( '.sl-edit-keywords' ).val().trim();
+
+			if ( ! url || ! title ) {
+				showNotice( 'error', 'URL i tytuł są wymagane.' );
+				return;
+			}
+
+			$btn.prop( 'disabled', true ).text( '...' );
+
+			$.ajax( {
+				url  : slAjax.url,
+				type : 'POST',
+				data : {
+					action   : 'sl_update_custom_url',
+					nonce    : slAjax.nonce,
+					id       : id,
+					url      : url,
+					title    : title,
+					keywords : keywords
+				},
+				success : function( res ) {
+					if ( res.success ) {
+						showNotice( 'success', res.data.message );
+						location.reload();
+					} else {
+						showNotice( 'error', res.data );
+						$btn.prop( 'disabled', false ).text( 'Zapisz' );
+					}
+				},
+				error : function() {
+					showNotice( 'error', 'Błąd serwera – spróbuj ponownie.' );
+					$btn.prop( 'disabled', false ).text( 'Zapisz' );
+				}
+			} );
+		} );
+
+		/* ── 6. Custom URL Threshold ──────────────────────────────── */
+
+		// Update threshold value display when slider moves
+		$( '#sl-custom-url-threshold' ).on( 'input', function() {
+			var val = parseFloat( $( this ).val() );
+			$( '#sl-custom-url-threshold-value' ).text( val.toFixed( 2 ) );
+		} );
+
+		// Save threshold via AJAX
+		$( '#sl-btn-save-threshold' ).on( 'click', function() {
+			var $btn      = $( this );
+			var $msg      = $( '#sl-threshold-saved-msg' );
+			var threshold = parseFloat( $( '#sl-custom-url-threshold' ).val() );
+
+			$btn.prop( 'disabled', true ).text( 'Zapisywanie...' );
+
+			$.ajax( {
+				url  : slAjax.url,
+				type : 'POST',
+				data : {
+					action    : 'sl_save_custom_url_threshold',
+					nonce     : slAjax.nonce,
+					threshold : threshold
+				},
+				success : function( res ) {
+					$btn.prop( 'disabled', false ).text( 'Zapisz próg' );
+					if ( res.success ) {
+						$msg.fadeIn( 200 );
+						setTimeout( function() {
+							$msg.fadeOut( 200 );
+						}, 2000 );
+					} else {
+						showNotice( 'error', res.data || 'Błąd zapisywania.' );
+					}
+				},
+				error : function() {
+					$btn.prop( 'disabled', false ).text( 'Zapisz próg' );
+					showNotice( 'error', 'Błąd serwera – spróbuj ponownie.' );
+				}
+			} );
+		} );
+
+		/* ── 7. Debug Logs Toggle ────────────────────────────────────── */
+
+		$( '#sl-debug-toggle' ).on( 'click', function() {
+			var $content = $( '#sl-debug-content' );
+			var $arrow   = $( '#sl-debug-arrow' );
+
+			$content.slideToggle( 200, function() {
+				if ( $content.is( ':visible' ) ) {
+					$arrow.css( 'transform', 'rotate(90deg)' );
+				} else {
+					$arrow.css( 'transform', 'rotate(0deg)' );
+				}
+			} );
+		} );
+
 	} );   // ready
 
 } )( jQuery );

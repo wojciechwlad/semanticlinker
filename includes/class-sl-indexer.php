@@ -169,6 +169,9 @@ class SL_Indexer {
 		] );
 
 		if ( empty( $posts ) ) {
+			// Before moving to matching phase, generate embeddings for any custom URLs that need them
+			self::process_custom_urls_needing_embedding();
+
 			// No more posts - move to matching phase
 			$progress['phase'] = 'matching';
 			set_transient( self::PROGRESS_KEY, $progress, HOUR_IN_SECONDS );
@@ -408,6 +411,8 @@ class SL_Indexer {
 		if ( empty( $to_embed ) ) {
 			SL_Debug::log( 'indexer', 'All posts already indexed - running matcher only' );
 			update_option( 'sl_last_indexing_run', current_time( 'mysql' ) );
+			// Process any custom URLs needing embeddings
+			self::process_custom_urls_needing_embedding();
 			// Even if nothing changed, run matching for new posts
 			( new SL_Matcher() )->match_all();
 			return;
@@ -469,6 +474,9 @@ class SL_Indexer {
 		SL_Debug::log( 'indexer', 'Embeddings persisted', [ 'posts_updated' => count( $flushed ) ] );
 
 		update_option( 'sl_last_indexing_run', current_time( 'mysql' ) );
+
+		// Process any custom URLs needing embeddings before matching
+		self::process_custom_urls_needing_embedding();
 
 		/* ── Phase 2: matching ───────────────────────────────────── */
 		SL_Debug::log( 'indexer', '=== STARTING MATCHER ===' );
@@ -562,5 +570,54 @@ class SL_Indexer {
 		}
 
 		return $chunks;
+	}
+
+	/* ── Custom URLs embedding ────────────────────────────────────────── */
+
+	/**
+	 * Generate embeddings for any custom URLs that are missing them.
+	 * Called during indexing transition to matching phase.
+	 */
+	private static function process_custom_urls_needing_embedding(): void {
+		$custom_urls = SL_DB::get_custom_urls_needing_embedding();
+
+		if ( empty( $custom_urls ) ) {
+			return;
+		}
+
+		SL_Debug::log( 'indexer', 'Generating embeddings for custom URLs', [
+			'count' => count( $custom_urls ),
+		] );
+
+		$api = new SL_Embedding_API();
+
+		// Batch embed all custom URLs
+		$texts = [];
+		foreach ( $custom_urls as $custom ) {
+			$text = $custom->title;
+			if ( ! empty( $custom->keywords ) ) {
+				$text .= ' ' . $custom->keywords;
+			}
+			$texts[] = $text;
+		}
+
+		$embeddings = $api->embed( $texts );
+
+		if ( ! $embeddings || count( $embeddings ) !== count( $custom_urls ) ) {
+			SL_Debug::log( 'indexer', 'ERROR: Failed to generate custom URL embeddings', [
+				'expected' => count( $custom_urls ),
+				'got'      => $embeddings ? count( $embeddings ) : 0,
+			] );
+			return;
+		}
+
+		// Save embeddings
+		foreach ( $custom_urls as $idx => $custom ) {
+			SL_DB::update_custom_url_embedding( $custom->ID, $embeddings[ $idx ] );
+		}
+
+		SL_Debug::log( 'indexer', 'Custom URL embeddings generated', [
+			'count' => count( $embeddings ),
+		] );
 	}
 }

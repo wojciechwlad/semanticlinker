@@ -250,7 +250,7 @@ Zwróć wynik:
 			],
 			'generationConfig' => [
 				'temperature'     => 0.1,  // Low temperature for consistent responses
-				'maxOutputTokens' => 50,   // Needs room for thinking tokens + TAK/NIE response
+				'maxOutputTokens' => 256,  // Gemini 2.5+ needs room for thinking + TAK/NIE response
 			]
 		];
 

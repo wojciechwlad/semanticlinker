@@ -9,6 +9,13 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class SL_DB {
 
+	/**
+	 * In-memory cache for active links count per URL.
+	 * Prevents thousands of DB queries during matching.
+	 * @var array|null  [ target_url => count ] or null if not loaded
+	 */
+	private static ?array $url_links_cache = null;
+
 	/* ═══════════════════════════════════════════════════════════════
 	 * LINKS (wp_semantic_links)
 	 * ═══════════════════════════════════════════════════════════════ */
@@ -223,6 +230,70 @@ class SL_DB {
 				$post_id
 			)
 		);
+	}
+
+	/**
+	 * Preload URL links counts into cache (one query instead of thousands).
+	 * Call this at the start of matching to avoid per-candidate DB queries.
+	 */
+	public static function preload_url_links_cache(): void {
+		global $wpdb;
+
+		self::$url_links_cache = [];
+
+		$results = $wpdb->get_results(
+			"SELECT target_url, COUNT(*) as cnt
+			 FROM {$wpdb->prefix}semantic_links
+			 WHERE status = 'active'
+			 GROUP BY target_url"
+		);
+
+		foreach ( $results as $row ) {
+			self::$url_links_cache[ $row->target_url ] = (int) $row->cnt;
+		}
+	}
+
+	/**
+	 * Reset the URL links cache (call when links are modified).
+	 */
+	public static function reset_url_links_cache(): void {
+		self::$url_links_cache = null;
+	}
+
+	/**
+	 * How many active links point to a specific target URL (cluster)?
+	 * Uses cache if available for performance.
+	 *
+	 * @param string $target_url  The target URL to check.
+	 * @return int  Count of active links to this URL.
+	 */
+	public static function get_active_links_to_url( string $target_url ): int {
+		// Use cache if loaded
+		if ( self::$url_links_cache !== null ) {
+			return self::$url_links_cache[ $target_url ] ?? 0;
+		}
+
+		// Fallback to direct query
+		global $wpdb;
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$wpdb->prefix}semantic_links
+				 WHERE target_url = %s AND status = 'active'",
+				$target_url
+			)
+		);
+	}
+
+	/**
+	 * Increment the cached count for a URL (after inserting a link).
+	 * Only works if cache is loaded.
+	 *
+	 * @param string $target_url  The target URL.
+	 */
+	public static function increment_url_links_cache( string $target_url ): void {
+		if ( self::$url_links_cache !== null ) {
+			self::$url_links_cache[ $target_url ] = ( self::$url_links_cache[ $target_url ] ?? 0 ) + 1;
+		}
 	}
 
 	/**
@@ -505,5 +576,252 @@ class SL_DB {
 	public static function delete_all_embeddings(): int {
 		global $wpdb;
 		return (int) $wpdb->query( "DELETE FROM {$wpdb->prefix}semantic_embeddings" );
+	}
+
+	/* ═══════════════════════════════════════════════════════════════
+	 * CUSTOM URLS (wp_semantic_custom_urls)
+	 * ═══════════════════════════════════════════════════════════════ */
+
+	/** Maximum number of custom URLs allowed. */
+	public const MAX_CUSTOM_URLS = 100;
+
+	/**
+	 * Get the max custom URLs limit.
+	 */
+	public static function get_max_custom_urls(): int {
+		return self::MAX_CUSTOM_URLS;
+	}
+
+	/**
+	 * Insert a new custom URL.
+	 *
+	 * @param array $data Keys: url, title, keywords (optional)
+	 * @return int|false Inserted ID or false on failure.
+	 */
+	public static function insert_custom_url( array $data ) {
+		global $wpdb;
+
+		// Check limit
+		if ( self::get_custom_url_count() >= self::MAX_CUSTOM_URLS ) {
+			return false;
+		}
+
+		// Validate required fields
+		if ( empty( $data['url'] ) || empty( $data['title'] ) ) {
+			return false;
+		}
+
+		$url      = esc_url_raw( $data['url'] );
+		$title    = sanitize_text_field( $data['title'] );
+		$keywords = sanitize_textarea_field( $data['keywords'] ?? '' );
+
+		// Validate URL format
+		if ( ! filter_var( $url, FILTER_VALIDATE_URL ) ) {
+			return false;
+		}
+
+		// Check for duplicate URL
+		if ( self::custom_url_exists( $url ) ) {
+			return false;
+		}
+
+		$ok = $wpdb->insert(
+			$wpdb->prefix . 'semantic_custom_urls',
+			[
+				'url'      => $url,
+				'title'    => $title,
+				'keywords' => $keywords,
+				'status'   => 'active',
+			],
+			[ '%s', '%s', '%s', '%s' ]
+		);
+
+		return $ok ? $wpdb->insert_id : false;
+	}
+
+	/**
+	 * Update an existing custom URL.
+	 *
+	 * @param int   $id   Custom URL ID.
+	 * @param array $data Keys: url, title, keywords.
+	 * @return bool True on success.
+	 */
+	public static function update_custom_url( int $id, array $data ): bool {
+		global $wpdb;
+
+		$update = [];
+		$format = [];
+
+		if ( isset( $data['url'] ) ) {
+			$url = esc_url_raw( $data['url'] );
+			if ( ! filter_var( $url, FILTER_VALIDATE_URL ) ) {
+				return false;
+			}
+			// Check if URL is used by another entry
+			$existing = $wpdb->get_var(
+				$wpdb->prepare(
+					"SELECT ID FROM {$wpdb->prefix}semantic_custom_urls WHERE url = %s AND ID != %d",
+					$url,
+					$id
+				)
+			);
+			if ( $existing ) {
+				return false;
+			}
+			$update['url'] = $url;
+			$format[] = '%s';
+		}
+
+		if ( isset( $data['title'] ) ) {
+			$update['title'] = sanitize_text_field( $data['title'] );
+			$format[] = '%s';
+		}
+
+		if ( isset( $data['keywords'] ) ) {
+			$update['keywords'] = sanitize_textarea_field( $data['keywords'] );
+			$format[] = '%s';
+		}
+
+		// Clear embedding if content changed (will be regenerated)
+		if ( isset( $data['title'] ) || isset( $data['keywords'] ) ) {
+			$update['embedding'] = null;
+			$format[] = '%s';
+		}
+
+		if ( empty( $update ) ) {
+			return true;
+		}
+
+		return (bool) $wpdb->update(
+			$wpdb->prefix . 'semantic_custom_urls',
+			$update,
+			[ 'ID' => $id ],
+			$format,
+			[ '%d' ]
+		);
+	}
+
+	/**
+	 * Delete a custom URL.
+	 *
+	 * @param int $id Custom URL ID.
+	 * @return bool True on success.
+	 */
+	public static function delete_custom_url( int $id ): bool {
+		global $wpdb;
+		return (bool) $wpdb->delete(
+			$wpdb->prefix . 'semantic_custom_urls',
+			[ 'ID' => $id ],
+			[ '%d' ]
+		);
+	}
+
+	/**
+	 * Get a single custom URL by ID.
+	 *
+	 * @param int $id Custom URL ID.
+	 * @return object|null
+	 */
+	public static function get_custom_url( int $id ) {
+		global $wpdb;
+		return $wpdb->get_row(
+			$wpdb->prepare(
+				"SELECT * FROM {$wpdb->prefix}semantic_custom_urls WHERE ID = %d",
+				$id
+			)
+		);
+	}
+
+	/**
+	 * Get all custom URLs.
+	 *
+	 * @param string $status Optional status filter.
+	 * @return object[]
+	 */
+	public static function get_all_custom_urls( string $status = '' ): array {
+		global $wpdb;
+		$q = "SELECT * FROM {$wpdb->prefix}semantic_custom_urls";
+		if ( $status !== '' ) {
+			$q .= $wpdb->prepare( " WHERE status = %s", $status );
+		}
+		$q .= " ORDER BY created_at DESC";
+		return $wpdb->get_results( $q );
+	}
+
+	/**
+	 * Count custom URLs.
+	 *
+	 * @return int
+	 */
+	public static function get_custom_url_count(): int {
+		global $wpdb;
+		return (int) $wpdb->get_var(
+			"SELECT COUNT(*) FROM {$wpdb->prefix}semantic_custom_urls"
+		);
+	}
+
+	/**
+	 * Check if a URL already exists.
+	 *
+	 * @param string $url URL to check.
+	 * @return bool
+	 */
+	public static function custom_url_exists( string $url ): bool {
+		global $wpdb;
+		return (bool) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT 1 FROM {$wpdb->prefix}semantic_custom_urls WHERE url = %s LIMIT 1",
+				$url
+			)
+		);
+	}
+
+	/**
+	 * Get custom URLs that need embedding generation.
+	 *
+	 * @return object[]
+	 */
+	public static function get_custom_urls_needing_embedding(): array {
+		global $wpdb;
+		return $wpdb->get_results(
+			"SELECT * FROM {$wpdb->prefix}semantic_custom_urls
+			 WHERE embedding IS NULL AND status = 'active'"
+		);
+	}
+
+	/**
+	 * Update embedding for a custom URL.
+	 *
+	 * @param int   $id        Custom URL ID.
+	 * @param array $embedding Embedding vector.
+	 * @return bool
+	 */
+	public static function update_custom_url_embedding( int $id, array $embedding ): bool {
+		global $wpdb;
+		return (bool) $wpdb->update(
+			$wpdb->prefix . 'semantic_custom_urls',
+			[ 'embedding' => json_encode( $embedding ) ],
+			[ 'ID' => $id ],
+			[ '%s' ],
+			[ '%d' ]
+		);
+	}
+
+	/**
+	 * Get all custom URL embeddings (for matcher).
+	 *
+	 * @return object[] Objects with ID, url, title, keywords, embedding (decoded)
+	 */
+	public static function get_custom_url_embeddings(): array {
+		global $wpdb;
+		$rows = $wpdb->get_results(
+			"SELECT ID, url, title, keywords, embedding
+			 FROM {$wpdb->prefix}semantic_custom_urls
+			 WHERE status = 'active' AND embedding IS NOT NULL"
+		);
+		foreach ( $rows as $row ) {
+			$row->embedding = json_decode( $row->embedding, true );
+		}
+		return $rows;
 	}
 }

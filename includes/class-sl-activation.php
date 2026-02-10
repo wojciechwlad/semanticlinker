@@ -69,6 +69,24 @@ class SL_Activation {
 				KEY idx_hash       (content_hash)
 			) ENGINE=InnoDB $cc;"
 		);
+
+		/* 4. wp_semantic_custom_urls – user-defined external/custom URLs for linking */
+		$wpdb->query(
+			"CREATE TABLE IF NOT EXISTS {$wpdb->prefix}semantic_custom_urls (
+				ID            bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+				url           varchar(2083)       NOT NULL,
+				title         varchar(500)        NOT NULL,
+				keywords      text                NOT NULL,
+				embedding     longtext            DEFAULT NULL,
+				status        varchar(20)         NOT NULL DEFAULT 'active',
+				created_at    datetime            NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at    datetime            NOT NULL DEFAULT CURRENT_TIMESTAMP
+					ON UPDATE CURRENT_TIMESTAMP,
+				PRIMARY KEY   (ID),
+				UNIQUE KEY idx_url (url(200)),
+				KEY idx_status (status)
+			) ENGINE=InnoDB $cc;"
+		);
 	}
 
 	/* ── Cron ────────────────────────────────────────────────────── */

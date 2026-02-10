@@ -131,6 +131,9 @@ class SL_Settings {
 		/* Max links – int clamped to [1 … 30] */
 		$s['max_links_per_post'] = max( 1, min( 30, (int) ( $input['max_links_per_post'] ?? 10 ) ) );
 
+		/* Max links per URL (cluster) – int clamped to [1 … 50] */
+		$s['max_links_per_url'] = max( 1, min( 50, (int) ( $input['max_links_per_url'] ?? 10 ) ) );
+
 		/* Anchor word count limits */
 		$s['min_anchor_words'] = max( 1, min( 10, (int) ( $input['min_anchor_words'] ?? 3 ) ) );
 		$s['max_anchor_words'] = max( 1, min( 15, (int) ( $input['max_anchor_words'] ?? 10 ) ) );
@@ -254,6 +257,8 @@ class SL_Settings {
 			'excluded_post_ids'    => [],
 			'cluster_threshold'    => 0.75,
 			'cron_enabled'         => false,
+			'custom_url_threshold' => 0.65,
+			'max_links_per_url'    => 10,
 		];
 		return array_merge( $defaults, get_option( self::OPTION_KEY, [] ) );
 	}

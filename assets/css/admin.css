@@ -38,6 +38,11 @@
 .sl-badge-warn     { background: #fff3cd; color: #856404; }
 .sl-badge-filtered { background: #e2e3e5; color: #6c757d; }
 .sl-badge-cluster  { background: #cce5ff; color: #004085; }
+.sl-badge-custom   { background: #e8daef; color: #6c3483; font-size: 11px; padding: 1px 6px; margin-left: 6px; }
+
+/* Custom URL cluster highlight */
+.sl-cluster-custom { background: #f5eef8 !important; }
+.sl-cluster-custom .sl-cluster-label { color: #6c3483; }
 
 /* ── Two-column layout (settings + sidebar) ─────────────────────── */
 .sl-layout {

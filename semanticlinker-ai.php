@@ -4,7 +4,7 @@
  * Description: Automatyzacja linkowania wewnętrznego via embeddings.
  *              Linki wstrzyknięte dynamicznie przy renderowaniu —
  *              wp_posts niemodyfikowane (non-destructive).
- * Version:     1.0.0
+ * Version:     1.1.0
  * Author:      WojciechW
  * License:     GPL v2 or later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'SL_VERSION',     '1.0.0' );
+define( 'SL_VERSION',     '1.1.0' );
 define( 'SL_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'SL_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );
 
@@ -36,6 +36,7 @@ function sl_autoload( string $class ): void {
 		'SL_DB'             => SL_PLUGIN_DIR . 'includes/class-sl-db.php',
 		'SL_Settings'       => SL_PLUGIN_DIR . 'includes/class-sl-settings.php',
 		'SL_Dashboard'      => SL_PLUGIN_DIR . 'includes/class-sl-dashboard.php',
+		'SL_Custom_Urls'    => SL_PLUGIN_DIR . 'includes/class-sl-custom-urls.php',
 		'SL_Embedding_API'  => SL_PLUGIN_DIR . 'includes/class-sl-embedding-api.php',
 		'SL_Indexer'        => SL_PLUGIN_DIR . 'includes/class-sl-indexer.php',
 		'SL_Matcher'        => SL_PLUGIN_DIR . 'includes/class-sl-matcher.php',
@@ -57,12 +58,31 @@ function semanticlinker_init(): void {
 	new SL_Security();  // Initialize security features first
 	new SL_Settings();
 	new SL_Dashboard();
+	new SL_Custom_Urls();
 	new SL_Injector();
 	new SL_Indexer();
 	new SL_Ajax();
 }
 
 add_action( 'plugins_loaded', 'semanticlinker_init' );
+
+/* ─── Version check for table migrations ────────────────────────────── */
+
+/**
+ * Check if plugin was updated and run table creation if needed.
+ * This ensures new tables (like semantic_custom_urls) are created on update.
+ */
+function semanticlinker_check_version(): void {
+	$stored_version = get_option( 'sl_plugin_version', '1.0.0' );
+
+	if ( version_compare( $stored_version, SL_VERSION, '<' ) ) {
+		// Run table creation (creates any missing tables)
+		SL_Activation::activate();
+		update_option( 'sl_plugin_version', SL_VERSION );
+	}
+}
+
+add_action( 'admin_init', 'semanticlinker_check_version' );
 
 /* ─── Cleanup when post is deleted ──────────────────────────────────── */
 
