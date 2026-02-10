@@ -487,8 +487,9 @@ $api_key_decrypted = SL_Settings::get_api_key();
 
 	<!-- ══════════════════════════════════════════════════════════
 	     DEBUG LOGS (full width, outside the two-column layout)
+	     Hidden in production - uncomment to enable debugging
 	     ══════════════════════════════════════════════════════════ -->
-	<div class="sl-card">
+	<div class="sl-card" style="display: none;">
 		<h2 class="sl-card-title">Debug Logs</h2>
 		<p class="description" style="margin-bottom: 12px;">
 			Ostatnie 200 wpisów logów. Użyj przycisków do filtrowania i kopiowania.
