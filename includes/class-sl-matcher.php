@@ -540,21 +540,12 @@ class SL_Matcher {
 	public static function init_matching(): array {
 		SL_Debug::log( 'matcher', '=== BATCH MATCHING INITIALIZED ===' );
 
-		$title_rows = SL_DB::get_title_embeddings();
+		// Use lightweight query - only post IDs, no embedding vectors
+		// Full embeddings (800 posts × 3072 dims) would use ~490MB PHP memory
+		$source_ids = SL_DB::get_indexed_post_ids();
 
-		if ( count( $title_rows ) < 2 ) {
+		if ( count( $source_ids ) < 2 ) {
 			return [ 'error' => 'Za mało postów do porównania (min. 2).' ];
-		}
-
-		// Build target map
-		$target_map = [];
-		$source_ids = [];
-		foreach ( $title_rows as $row ) {
-			$target_map[ $row->post_id ] = [
-				'vec'   => $row->embedding,
-				'title' => $row->chunk_text,
-			];
-			$source_ids[] = (int) $row->post_id;
 		}
 
 		// Load existing anchors from DB - store only anchor + URL (no embeddings to save transient space)
@@ -624,6 +615,14 @@ class SL_Matcher {
 	 * @return array  Progress info.
 	 */
 	public static function process_matching_batch(): array {
+		// Loading 800 title embeddings (3072 dims each) requires ~200MB+ PHP memory.
+		// Increase limit for this request if the current limit is too low.
+		$current = ini_get( 'memory_limit' );
+		$current_bytes = wp_convert_hr_to_bytes( $current );
+		if ( $current_bytes < 512 * 1024 * 1024 ) {
+			ini_set( 'memory_limit', '512M' );
+		}
+
 		$progress = get_transient( self::PROGRESS_KEY );
 
 		if ( ! $progress ) {

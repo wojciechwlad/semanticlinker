@@ -553,6 +553,21 @@ class SL_DB {
 	}
 
 	/**
+	 * Get ONLY post_ids of indexed posts (chunk_index = 0), WITHOUT loading embedding vectors.
+	 * Use this instead of get_title_embeddings() when you only need the list of post IDs.
+	 * Dramatically lower memory usage: ~100 bytes/post instead of ~200KB/post.
+	 *
+	 * @return int[]  Flat array of post IDs.
+	 */
+	public static function get_indexed_post_ids(): array {
+		global $wpdb;
+		$rows = $wpdb->get_results(
+			"SELECT post_id FROM {$wpdb->prefix}semantic_embeddings WHERE chunk_index = 0"
+		);
+		return array_map( fn( $r ) => (int) $r->post_id, $rows );
+	}
+
+	/**
 	 * Quick staleness check: does a row exist for this post with the
 	 * expected content_hash?  If yes the post has not changed since
 	 * the last embedding run.

@@ -122,6 +122,16 @@ class SL_Indexer {
 					delete_transient( self::PROGRESS_KEY );
 					return [ 'error' => $init_result['error'] ];
 				}
+				// Return after init WITHOUT processing first batch in the same request.
+				// init_matching() already uses memory for anchor loading.
+				// process_matching_batch() will load all title embeddings (~490MB peak for 800 posts).
+				// Splitting into separate requests prevents double memory usage in one request.
+				return [
+					'total_posts' => $progress['total_posts'],
+					'processed'   => $progress['total_posts'],
+					'phase'       => 'matching',
+					'message'     => sprintf( 'Matcher zainicjalizowany (%d postów). Rozpoczynam dopasowanie...', $init_result['total_sources'] ?? 0 ),
+				];
 			}
 
 			// Process matching batch
