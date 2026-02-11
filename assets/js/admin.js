@@ -390,17 +390,32 @@
 							$indexingText.text( 'Timeout - ponawiam...' );
 							setTimeout( processBatch, 1000 );
 						} else {
-							handleError( 'Błąd serwera: ' + error );
+							// Extract PHP error details from response body
+							var detail = '';
+							if ( xhr.responseText ) {
+								try {
+									var parsed = JSON.parse( xhr.responseText );
+									if ( parsed.data ) { detail = parsed.data; }
+								} catch ( e ) {
+									var raw = xhr.responseText.replace( /<[^>]+>/g, '' ).trim();
+									if ( raw.length > 0 ) { detail = raw.substring( 0, 300 ); }
+								}
+							}
+							handleError( detail || ( 'HTTP ' + xhr.status + ' ' + error ) );
+							refreshDebugLogs(); // Auto-refresh logs so user can see the cause
 						}
 					}
 				} );
 			}
 
 			function handleError( msg ) {
-				$status.text( '\u2717 ' + msg ).css( 'color', '#a32d2d' );
-				$btn.prop( 'disabled', false ).text( '\u21BB Reindeksuj teraz' );
+				$status.text( '✗ Błąd serwera' ).css( 'color', '#a32d2d' );
+				$btn.prop( 'disabled', false ).text( '↻ Reindeksuj teraz' );
 				$cancelBtn.hide();
-				showNotice( 'error', msg );
+				showNotice( 'error', msg + ' — sprawdź Debug Logs poniżej.' );
+				// Auto-expand debug section on error
+				$( '#sl-debug-content' ).slideDown( 200 );
+				$( '#sl-debug-arrow' ).css( 'transform', 'rotate(90deg)' );
 				if ( $progress.length ) {
 					$progress.hide();
 				}

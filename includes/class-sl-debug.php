@@ -59,6 +59,43 @@ class SL_Debug {
 	}
 
 	/**
+	 * Register a PHP shutdown handler to catch fatal errors (OOM, timeout, parse errors).
+	 * Regular try/catch cannot catch these - only register_shutdown_function can.
+	 * Call this at the start of heavy AJAX operations.
+	 */
+	public static function register_shutdown_handler(): void {
+		register_shutdown_function( function() {
+			$error = error_get_last();
+
+			// Only log real fatal errors, not normal shutdowns
+			$fatal_types = [ E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR ];
+			if ( ! $error || ! in_array( $error['type'], $fatal_types, true ) ) {
+				return;
+			}
+
+			// Map error type to human-readable name
+			$type_names = [
+				E_ERROR       => 'Fatal Error',
+				E_PARSE       => 'Parse Error',
+				E_CORE_ERROR  => 'Core Error',
+				E_COMPILE_ERROR => 'Compile Error',
+				E_USER_ERROR  => 'User Error',
+			];
+			$type_label = $type_names[ $error['type'] ] ?? 'Unknown Error';
+
+			self::log( 'error', 'PHP ' . $type_label . ': ' . $error['message'], [
+				'file' => str_replace( ABSPATH, '', $error['file'] ),  // Relative path
+				'line' => $error['line'],
+				'hint' => str_contains( $error['message'], 'Allowed memory size' )
+					? 'Memory limit exceeded - increase memory_limit in php.ini or wp-config.php'
+					: ( str_contains( $error['message'], 'Maximum execution time' )
+						? 'Execution timeout - increase max_execution_time in php.ini'
+						: '' ),
+			] );
+		} );
+	}
+
+	/**
 	 * Check if required tables exist.
 	 *
 	 * @return array

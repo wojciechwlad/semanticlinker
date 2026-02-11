@@ -109,14 +109,23 @@ class SL_Ajax {
 	 */
 	public function start_indexing(): void {
 		$this->verify();
+		SL_Debug::register_shutdown_handler();
 
-		$result = SL_Indexer::init_batch();
+		try {
+			$result = SL_Indexer::init_batch();
 
-		if ( isset( $result['error'] ) ) {
-			wp_send_json_error( $result['error'] );
+			if ( isset( $result['error'] ) ) {
+				wp_send_json_error( $result['error'] );
+			}
+
+			wp_send_json_success( $result );
+		} catch ( \Throwable $e ) {
+			SL_Debug::log( 'error', 'Exception in start_indexing: ' . $e->getMessage(), [
+				'file'  => str_replace( ABSPATH, '', $e->getFile() ),
+				'line'  => $e->getLine(),
+			] );
+			wp_send_json_error( 'Błąd PHP: ' . $e->getMessage() . ' — sprawdź Debug Logs.' );
 		}
-
-		wp_send_json_success( $result );
 	}
 
 	/**
@@ -124,14 +133,23 @@ class SL_Ajax {
 	 */
 	public function process_batch(): void {
 		$this->verify();
+		SL_Debug::register_shutdown_handler();
 
-		$result = SL_Indexer::process_batch();
+		try {
+			$result = SL_Indexer::process_batch();
 
-		if ( isset( $result['error'] ) ) {
-			wp_send_json_error( $result['error'] );
+			if ( isset( $result['error'] ) ) {
+				wp_send_json_error( $result['error'] );
+			}
+
+			wp_send_json_success( $result );
+		} catch ( \Throwable $e ) {
+			SL_Debug::log( 'error', 'Exception in process_batch: ' . $e->getMessage(), [
+				'file'  => str_replace( ABSPATH, '', $e->getFile() ),
+				'line'  => $e->getLine(),
+			] );
+			wp_send_json_error( 'Błąd PHP: ' . $e->getMessage() . ' — sprawdź Debug Logs.' );
 		}
-
-		wp_send_json_success( $result );
 	}
 
 	/* ── Delete all links ──────────────────────────────────────── */
