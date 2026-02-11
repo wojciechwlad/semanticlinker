@@ -27,7 +27,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class SL_Matcher {
 
 	/** Number of source posts to process per batch for matching. */
-	private const BATCH_SIZE = 10;
+	private const BATCH_SIZE = 5;
 
 	/** Number of links to filter with Gemini per batch. */
 	private const GEMINI_BATCH_SIZE = 20;
