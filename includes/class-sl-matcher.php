@@ -35,6 +35,9 @@ class SL_Matcher {
 	/** Transient key for storing matching progress. */
 	private const PROGRESS_KEY = 'sl_matching_progress';
 
+	/** Transient key for pre-packed title embedding cache (avoids 30-40s DB reload per batch). */
+	private const TARGET_CACHE_KEY = 'sl_matching_target_cache';
+
 	/** Maximum anchor clusters to store in transient (memory protection). */
 	private const MAX_CLUSTERS = 3000;
 
@@ -538,6 +541,12 @@ class SL_Matcher {
 	 * @return array  Progress info.
 	 */
 	public static function init_matching(): array {
+		// Loading all title embeddings requires ~200MB+ PHP memory.
+		$current_bytes = wp_convert_hr_to_bytes( ini_get( 'memory_limit' ) );
+		if ( $current_bytes < 512 * 1024 * 1024 ) {
+			ini_set( 'memory_limit', '512M' );
+		}
+
 		SL_Debug::log( 'matcher', '=== BATCH MATCHING INITIALIZED ===' );
 
 		// Use lightweight query - only post IDs, no embedding vectors
@@ -547,6 +556,39 @@ class SL_Matcher {
 		if ( count( $source_ids ) < 2 ) {
 			return [ 'error' => 'Za mało postów do porównania (min. 2).' ];
 		}
+
+		// Pre-load title embeddings and pack as float32 binary.
+		// This is a one-time 30-40s cost here, but each subsequent batch request
+		// loads from this cache in ~1s instead of paying the DB+JSON-decode penalty.
+		$title_rows  = SL_DB::get_title_embeddings();
+		$custom_urls = SL_DB::get_custom_url_embeddings();
+		$target_cache = [];
+
+		foreach ( $title_rows as $row ) {
+			if ( ! empty( $row->embedding ) && is_array( $row->embedding ) ) {
+				$target_cache[ $row->post_id ] = [
+					'vec_binary' => pack( 'f*', ...$row->embedding ),
+					'title'      => $row->chunk_text,
+				];
+			}
+		}
+		foreach ( $custom_urls as $custom ) {
+			if ( is_array( $custom->embedding ) && count( $custom->embedding ) > 0 ) {
+				$target_cache[ 'custom_' . $custom->ID ] = [
+					'vec_binary'  => pack( 'f*', ...$custom->embedding ),
+					'title'       => $custom->title,
+					'target_type' => 'custom',
+					'url'         => $custom->url,
+				];
+			}
+		}
+
+		set_transient( self::TARGET_CACHE_KEY, $target_cache, HOUR_IN_SECONDS );
+		SL_Debug::log( 'matcher', 'Target embeddings cached', [
+			'posts_cached'       => count( $title_rows ),
+			'custom_urls_cached' => count( $custom_urls ),
+		] );
+		unset( $title_rows, $target_cache );  // Free memory before building progress transient
 
 		// Load existing anchors from DB - store only anchor + URL (no embeddings to save transient space)
 		// Embeddings will be computed on-the-fly during batch processing
@@ -653,6 +695,7 @@ class SL_Matcher {
 		// Phase: Complete
 		if ( $progress['phase'] === 'complete' ) {
 			delete_transient( self::PROGRESS_KEY );
+			delete_transient( self::TARGET_CACHE_KEY );
 			return [
 				'complete' => true,
 				'message'  => sprintf(
@@ -667,43 +710,50 @@ class SL_Matcher {
 		$threshold  = (float) SL_Settings::get( 'similarity_threshold', 0.85 );
 		$excluded_ids = SL_Settings::get( 'excluded_post_ids', [] );
 
-		// Load target map (posts)
-		$title_rows = SL_DB::get_title_embeddings();
-		$target_map = [];
-		foreach ( $title_rows as $row ) {
-			$target_map[ $row->post_id ] = [
-				'vec'         => $row->embedding,
-				'title'       => $row->chunk_text,
-				'target_type' => 'post',
-			];
-		}
+		// Load target map from the cache populated during init_matching().
+		// Avoids the 30-40s DB+JSON-decode penalty that previously hit every batch.
+		$target_cache = get_transient( self::TARGET_CACHE_KEY );
+		$target_map   = [];
 
-		// Load custom URLs into target map
-		$custom_urls = SL_DB::get_custom_url_embeddings();
-		foreach ( $custom_urls as $custom ) {
-			$custom_key = 'custom_' . $custom->ID;
-			$has_valid_embedding = is_array( $custom->embedding ) && count( $custom->embedding ) > 0;
-			$target_map[ $custom_key ] = [
-				'vec'         => $custom->embedding,
-				'title'       => $custom->title,
-				'target_type' => 'custom',
-				'url'         => $custom->url,
-			];
-			// Debug each custom URL
-			SL_Debug::log( 'matcher', 'Custom URL added to target map', [
-				'id'              => $custom->ID,
-				'title'           => $custom->title,
-				'url'             => $custom->url,
-				'has_embedding'   => $has_valid_embedding ? 'yes' : 'NO!',
-				'embedding_dim'   => $has_valid_embedding ? count( $custom->embedding ) : 0,
+		if ( $target_cache ) {
+			foreach ( $target_cache as $key => $cached ) {
+				$entry = [
+					'vec'         => array_values( unpack( 'f*', $cached['vec_binary'] ) ),
+					'title'       => $cached['title'],
+					'target_type' => $cached['target_type'] ?? 'post',
+				];
+				if ( isset( $cached['url'] ) ) {
+					$entry['url'] = $cached['url'];
+				}
+				$target_map[ $key ] = $entry;
+			}
+			SL_Debug::log( 'matcher', 'Batch: target map from cache', [
+				'entries' => count( $target_map ),
+			] );
+		} else {
+			// Cache miss – fall back to direct DB load (slower, but correct)
+			SL_Debug::log( 'matcher', 'Batch: target cache miss – loading from DB (slow path)', [] );
+			$title_rows = SL_DB::get_title_embeddings();
+			foreach ( $title_rows as $row ) {
+				$target_map[ $row->post_id ] = [
+					'vec'         => $row->embedding,
+					'title'       => $row->chunk_text,
+					'target_type' => 'post',
+				];
+			}
+			$custom_urls = SL_DB::get_custom_url_embeddings();
+			foreach ( $custom_urls as $custom ) {
+				$target_map[ 'custom_' . $custom->ID ] = [
+					'vec'         => $custom->embedding,
+					'title'       => $custom->title,
+					'target_type' => 'custom',
+					'url'         => $custom->url,
+				];
+			}
+			SL_Debug::log( 'matcher', 'Batch: Custom URLs loaded summary (fallback)', [
+				'count' => count( $custom_urls ),
 			] );
 		}
-
-		// Debug: Log custom URLs summary
-		SL_Debug::log( 'matcher', 'Batch: Custom URLs loaded summary', [
-			'count'  => count( $custom_urls ),
-			'titles' => array_map( fn( $u ) => $u->title, $custom_urls ),
-		] );
 
 		// Get batch of source IDs
 		$batch_ids = array_slice(
@@ -1502,6 +1552,7 @@ class SL_Matcher {
 		$had_progress = get_transient( self::PROGRESS_KEY ) !== false;
 
 		delete_transient( self::PROGRESS_KEY );
+		delete_transient( self::TARGET_CACHE_KEY );
 
 		// Also cancel indexer if needed (prevent recursion with false flag)
 		if ( $cancel_indexer ) {
