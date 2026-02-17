@@ -1,5 +1,5 @@
 <?php
-if ( ! defined( 'ABSPATH' ) ) {
+if (!defined('ABSPATH')) {
 	exit;
 }
 
@@ -8,27 +8,30 @@ if ( ! defined( 'ABSPATH' ) ) {
  * handles form save (with PRG redirect), and exposes static read
  * helpers used by every other class in the plugin.
  */
-class SL_Settings {
+class SL_Settings
+{
 
 	/** WordPress option key that stores the entire settings array. */
 	const OPTION_KEY = 'semanticlinker_settings';
 
-	public function __construct() {
-		add_action( 'admin_init',            [ $this, 'handle_save' ] );
-		add_action( 'admin_menu',            [ $this, 'add_pages' ] );
-		add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_assets' ] );
+	public function __construct()
+	{
+		add_action('admin_init', [$this, 'handle_save']);
+		add_action('admin_menu', [$this, 'add_pages']);
+		add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
 	}
 
 	/* ── Menu registration ──────────────────────────────────────── */
 
-	public function add_pages(): void {
+	public function add_pages(): void
+	{
 		/* Top-level menu (icon + position) */
 		add_menu_page(
 			'SemanticLinker AI',
 			'SemanticLinker AI',
 			'manage_options',
 			'semanticlinker',
-			[ $this, 'render_settings' ],
+			[$this, 'render_settings'],
 			'dashicons-admin-links',
 			59
 		);
@@ -39,15 +42,16 @@ class SL_Settings {
 			'Ustawienia',
 			'manage_options',
 			'semanticlinker',
-			[ $this, 'render_settings' ]
+			[$this, 'render_settings']
 		);
 	}
 
 	/* ── Assets (shared by Settings + Dashboard) ───────────────── */
 
-	public function enqueue_assets( string $hook ): void {
+	public function enqueue_assets(string $hook): void
+	{
 		// Load on all SemanticLinker pages
-		if ( strpos( $hook, 'semanticlinker' ) === false ) {
+		if (strpos($hook, 'semanticlinker') === false) {
 			return;
 		}
 		wp_enqueue_style(
@@ -59,46 +63,48 @@ class SL_Settings {
 		wp_enqueue_script(
 			'sl-admin',
 			SL_PLUGIN_URL . 'assets/js/admin.js',
-			[ 'jquery' ],
+			['jquery'],
 			SL_VERSION . '.' . time(),  // bust cache
 			true  // in_footer
 		);
-		wp_localize_script( 'sl-admin', 'slAjax', [
-			'url'   => admin_url( 'admin-ajax.php' ),
-			'nonce' => wp_create_nonce( 'sl_ajax_nonce' ),
-		] );
+		wp_localize_script('sl-admin', 'slAjax', [
+			'url' => admin_url('admin-ajax.php'),
+			'nonce' => wp_create_nonce('sl_ajax_nonce'),
+		]);
 	}
 
 	/* ── Render ─────────────────────────────────────────────────── */
 
-	public function render_settings(): void {
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( 'Brak uprawnień.' );
+	public function render_settings(): void
+	{
+		if (!current_user_can('manage_options')) {
+			wp_die('Brak uprawnień.');
 		}
 		require_once SL_PLUGIN_DIR . 'templates/settings.php';
 	}
 
 	/* ── Save (PRG pattern – called on admin_init, before output) ─ */
 
-	public function handle_save(): void {
-		if ( ! isset( $_POST['sl_save'] ) ) {
+	public function handle_save(): void
+	{
+		if (!isset($_POST['sl_save'])) {
 			return;
 		}
 		/* nonce check + capability */
-		check_admin_referer( 'sl_settings_save', 'sl_nonce' );
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_die( 'Brak uprawnień.' );
+		check_admin_referer('sl_settings_save', 'sl_nonce');
+		if (!current_user_can('manage_options')) {
+			wp_die('Brak uprawnień.');
 		}
 
-		$settings = self::sanitize( $_POST );
-		update_option( self::OPTION_KEY, $settings );
+		$settings = self::sanitize($_POST);
+		update_option(self::OPTION_KEY, $settings);
 
 		/* Update cron schedule AFTER settings are persisted */
-		self::update_cron_schedule( $settings['cron_enabled'] );
+		self::update_cron_schedule($settings['cron_enabled']);
 
 		/* Signal for the template, then redirect (PRG) */
-		set_transient( 'sl_settings_saved', true, 30 );
-		wp_redirect( admin_url( 'admin.php?page=semanticlinker' ) );
+		set_transient('sl_settings_saved', true, 30);
+		wp_redirect(admin_url('admin.php?page=semanticlinker'));
 		exit;
 	}
 
@@ -110,86 +116,112 @@ class SL_Settings {
 	 * @param array $input  Typically $_POST
 	 * @return array
 	 */
-	public static function sanitize( array $input ): array {
+	public static function sanitize(array $input): array
+	{
 		$s = [];
 
 		/* API key – encrypt before storing for security
 		 * If input is empty, preserve the existing key (for sidebar form that doesn't include it) */
-		$raw_key = sanitize_text_field( $input['api_key'] ?? '' );
-		if ( ! empty( $raw_key ) ) {
-			$s['api_key'] = SL_Security::encrypt_api_key( $raw_key );
+		$raw_key = sanitize_text_field($input['api_key'] ?? '');
+		if (!empty($raw_key)) {
+			$s['api_key'] = SL_Security::encrypt_api_key($raw_key);
 		} else {
 			// Preserve existing encrypted key
-			$existing = get_option( self::OPTION_KEY, [] );
+			$existing = get_option(self::OPTION_KEY, []);
 			$s['api_key'] = $existing['api_key'] ?? '';
 		}
 
 		/* Embedding model – free text input with default */
-		$model = sanitize_text_field( $input['embedding_model'] ?? '' );
-		$s['embedding_model'] = ! empty( $model ) ? $model : 'gemini-embedding-001';
+		$model = sanitize_text_field($input['embedding_model'] ?? '');
+		$s['embedding_model'] = !empty($model) ? $model : 'gemini-embedding-001';
 
 		/* Filter model (AI validation) – free text input with default */
-		$filter_model = sanitize_text_field( $input['filter_model'] ?? '' );
-		$s['filter_model'] = ! empty( $filter_model ) ? $filter_model : 'gemini-2.5-flash';
+		$filter_model = sanitize_text_field($input['filter_model'] ?? '');
+		$s['filter_model'] = !empty($filter_model) ? $filter_model : 'gemini-2.5-flash';
 
 		/* Threshold – float clamped to [0.50 … 1.00] */
-		$s['similarity_threshold'] = max( 0.50, min( 1.00, (float) ( $input['similarity_threshold'] ?? 0.75 ) ) );
+		$s['similarity_threshold'] = max(0.50, min(1.00, (float) ($input['similarity_threshold'] ?? 0.75)));
 
 		/* Max links – int clamped to [1 … 30] */
-		$s['max_links_per_post'] = max( 1, min( 30, (int) ( $input['max_links_per_post'] ?? 10 ) ) );
+		$s['max_links_per_post'] = max(1, min(30, (int) ($input['max_links_per_post'] ?? 10)));
 
 		/* Max links per URL (cluster) – int clamped to [1 … 50] */
-		$s['max_links_per_url'] = max( 1, min( 50, (int) ( $input['max_links_per_url'] ?? 10 ) ) );
+		$s['max_links_per_url'] = max(1, min(50, (int) ($input['max_links_per_url'] ?? 10)));
 
 		/* Anchor word count limits */
-		$s['min_anchor_words'] = max( 1, min( 10, (int) ( $input['min_anchor_words'] ?? 3 ) ) );
-		$s['max_anchor_words'] = max( 1, min( 15, (int) ( $input['max_anchor_words'] ?? 10 ) ) );
+		$s['min_anchor_words'] = max(1, min(10, (int) ($input['min_anchor_words'] ?? 3)));
+		$s['max_anchor_words'] = max(1, min(15, (int) ($input['max_anchor_words'] ?? 10)));
 
 		/* Ensure min <= max */
-		if ( $s['min_anchor_words'] > $s['max_anchor_words'] ) {
+		if ($s['min_anchor_words'] > $s['max_anchor_words']) {
 			$s['max_anchor_words'] = $s['min_anchor_words'];
 		}
 
 		/* Post types – array of sanitised strings; empty if nothing checked */
 		$s['post_types'] = array_values(
-			array_map( 'sanitize_text_field', $input['post_types'] ?? [] )
+			array_map('sanitize_text_field', $input['post_types'] ?? [])
 		);
 
+		/* Post type terms (limit by category) – nested array structure */
+		// Structure: [ 'post' => [ 'category' => [1, 2, 3] ], 'page' => ... ]
+		$s['post_type_terms'] = [];
+		if (!empty($input['post_type_terms']) && is_array($input['post_type_terms'])) {
+			foreach ($input['post_type_terms'] as $pt => $taxonomies) {
+				$pt = sanitize_text_field($pt);
+				if (!is_array($taxonomies)) {
+					continue;
+				}
+				foreach ($taxonomies as $tax => $terms) {
+					$tax = sanitize_text_field($tax);
+					if (!is_array($terms)) {
+						continue;
+					}
+					// Filter empty values and cast to int
+					$clean_terms = array_values(array_filter(array_map('absint', $terms)));
+					if (!empty($clean_terms)) {
+						$s['post_type_terms'][$pt][$tax] = $clean_terms;
+					}
+				}
+			}
+		}
+
 		/* Excluded HTML tags – one per line in a <textarea> */
-		$raw = is_string( $input['excluded_tags'] ?? '' )
-			? explode( "\n", $input['excluded_tags'] )
+		$raw = is_string($input['excluded_tags'] ?? '')
+			? explode("\n", $input['excluded_tags'])
 			: (array) $input['excluded_tags'];
 
 		$tags = array_filter(
 			array_map(
-				function ( $t ) { return preg_replace( '/[^a-z0-9]/i', '', trim( strtolower( $t ) ) ); },
+				function ($t) {
+					return preg_replace('/[^a-z0-9]/i', '', trim(strtolower($t))); },
 				$raw
 			),
-			function ( $t ) { return $t !== ''; }
+			function ($t) {
+				return $t !== ''; }
 		);
 
 		/* script + style must always be excluded */
 		$tags[] = 'script';
 		$tags[] = 'style';
-		$s['excluded_tags'] = array_values( array_unique( $tags ) );
+		$s['excluded_tags'] = array_values(array_unique($tags));
 
 		/* Gemini anchor filter – boolean checkbox */
-		$s['gemini_anchor_filter'] = ! empty( $input['gemini_anchor_filter'] );
+		$s['gemini_anchor_filter'] = !empty($input['gemini_anchor_filter']);
 
 		/* Same category only – boolean checkbox */
-		$s['same_category_only'] = ! empty( $input['same_category_only'] );
+		$s['same_category_only'] = !empty($input['same_category_only']);
 
 		/* Excluded post IDs – one per line or comma-separated */
-		$raw_ids = is_string( $input['excluded_post_ids'] ?? '' )
-			? preg_split( '/[\s,]+/', $input['excluded_post_ids'] )
+		$raw_ids = is_string($input['excluded_post_ids'] ?? '')
+			? preg_split('/[\s,]+/', $input['excluded_post_ids'])
 			: (array) $input['excluded_post_ids'];
-		$s['excluded_post_ids'] = array_values( array_filter( array_map( 'absint', $raw_ids ) ) );
+		$s['excluded_post_ids'] = array_values(array_filter(array_map('absint', $raw_ids)));
 
 		/* Cluster threshold – float clamped to [0.50 … 0.99] for anchor clustering */
-		$s['cluster_threshold'] = max( 0.50, min( 0.99, (float) ( $input['cluster_threshold'] ?? 0.75 ) ) );
+		$s['cluster_threshold'] = max(0.50, min(0.99, (float) ($input['cluster_threshold'] ?? 0.75)));
 
 		/* Auto-indexing cron – boolean checkbox (default: disabled) */
-		$s['cron_enabled'] = ! empty( $input['cron_enabled'] );
+		$s['cron_enabled'] = !empty($input['cron_enabled']);
 
 		return $s;
 	}
@@ -202,17 +234,18 @@ class SL_Settings {
 	 *
 	 * @param bool $enabled
 	 */
-	private static function update_cron_schedule( bool $enabled ): void {
+	private static function update_cron_schedule(bool $enabled): void
+	{
 		$hook = 'sl_run_indexing';
 
-		if ( $enabled ) {
+		if ($enabled) {
 			// Schedule if not already scheduled
-			if ( ! wp_next_scheduled( $hook ) ) {
-				wp_schedule_event( time() + HOUR_IN_SECONDS, 'hourly', $hook );
+			if (!wp_next_scheduled($hook)) {
+				wp_schedule_event(time() + HOUR_IN_SECONDS, 'hourly', $hook);
 			}
 		} else {
 			// Clear scheduled event
-			wp_clear_scheduled_hook( $hook );
+			wp_clear_scheduled_hook($hook);
 		}
 	}
 
@@ -225,9 +258,10 @@ class SL_Settings {
 	 * @param mixed  $default
 	 * @return mixed
 	 */
-	public static function get( string $key, $default = null ) {
-		$all = get_option( self::OPTION_KEY, [] );
-		return isset( $all[$key] ) ? $all[$key] : $default;
+	public static function get(string $key, $default = null)
+	{
+		$all = get_option(self::OPTION_KEY, []);
+		return isset($all[$key]) ? $all[$key] : $default;
 	}
 
 	/**
@@ -235,12 +269,13 @@ class SL_Settings {
 	 *
 	 * @return string  Decrypted API key or empty string.
 	 */
-	public static function get_api_key(): string {
-		$encrypted = self::get( 'api_key', '' );
-		if ( empty( $encrypted ) ) {
+	public static function get_api_key(): string
+	{
+		$encrypted = self::get('api_key', '');
+		if (empty($encrypted)) {
 			return '';
 		}
-		return SL_Security::decrypt_api_key( $encrypted );
+		return SL_Security::decrypt_api_key($encrypted);
 	}
 
 	/**
@@ -248,25 +283,27 @@ class SL_Settings {
 	 *
 	 * @return array
 	 */
-	public static function all(): array {
+	public static function all(): array
+	{
 		$defaults = [
-			'api_key'              => '',
-			'embedding_model'      => 'gemini-embedding-001',
-			'filter_model'         => 'gemini-2.5-flash',
+			'api_key' => '',
+			'embedding_model' => 'gemini-embedding-001',
+			'filter_model' => 'gemini-2.5-flash',
 			'similarity_threshold' => 0.75,
-			'max_links_per_post'   => 10,
-			'min_anchor_words'     => 3,
-			'max_anchor_words'     => 10,
-			'post_types'           => [ 'post' ],
-			'excluded_tags'        => [ 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'code', 'script', 'style' ],
+			'max_links_per_post' => 10,
+			'min_anchor_words' => 3,
+			'max_anchor_words' => 10,
+			'post_types' => ['post'],
+			'post_type_terms' => [],
+			'excluded_tags' => ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'code', 'script', 'style'],
 			'gemini_anchor_filter' => false,
-			'same_category_only'   => true,
-			'excluded_post_ids'    => [],
-			'cluster_threshold'    => 0.75,
-			'cron_enabled'         => false,
+			'same_category_only' => true,
+			'excluded_post_ids' => [],
+			'cluster_threshold' => 0.75,
+			'cron_enabled' => false,
 			'custom_url_threshold' => 0.65,
-			'max_links_per_url'    => 10,
+			'max_links_per_url' => 10,
 		];
-		return array_merge( $defaults, get_option( self::OPTION_KEY, [] ) );
+		return array_merge($defaults, get_option(self::OPTION_KEY, []));
 	}
 }

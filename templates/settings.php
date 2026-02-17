@@ -312,16 +312,71 @@ $api_key_decrypted = SL_Settings::get_api_key();
 					<td>
 						<div class="sl-checkbox-grid">
 							<?php foreach ( $all_pts as $pt ) : ?>
-								<label class="sl-cb-label">
-									<input
-										type="checkbox"
-										name="post_types[]"
-										value="<?php echo esc_attr( $pt->name ); ?>"
-										<?php checked( in_array( $pt->name, $s['post_types'], true ) ); ?>
-									/>
-									<?php echo esc_html( $pt->labels->singular_name ); ?>
-									<code><?php echo esc_html( $pt->name ); ?></code>
-								</label>
+								<div class="sl-pt-item" style="margin-bottom: 10px;">
+									<label class="sl-cb-label">
+										<input
+											type="checkbox"
+											name="post_types[]"
+											value="<?php echo esc_attr( $pt->name ); ?>"
+											<?php checked( in_array( $pt->name, $s['post_types'], true ) ); ?>
+											onchange="this.closest('.sl-pt-item').querySelector('.sl-pt-taxonomies').style.display = this.checked ? 'block' : 'none';"
+										/>
+										<strong><?php echo esc_html( $pt->labels->singular_name ); ?></strong>
+										<code style="color: #666;"><?php echo esc_html( $pt->name ); ?></code>
+									</label>
+
+									<?php
+									$is_active = in_array( $pt->name, $s['post_types'], true );
+									$taxonomies = get_object_taxonomies( $pt->name, 'objects' );
+									$hierarchical_taxonomies = array_filter( $taxonomies, function( $t ) {
+										return $t->hierarchical; // Only categories, not tags
+									} );
+									?>
+
+									<div class="sl-pt-taxonomies" style="display: <?php echo $is_active ? 'block' : 'none'; ?>; margin-left: 25px; padding-left: 10px; border-left: 2px solid #eee; margin-top: 5px;">
+										<?php if ( ! empty( $hierarchical_taxonomies ) ) : ?>
+											<?php foreach ( $hierarchical_taxonomies as $tax ) : ?>
+												<div class="sl-tax-group" style="margin-bottom: 8px;">
+													<p style="margin: 0 0 4px; font-size: 12px; font-weight: 600; color: #555;">
+														<?php echo esc_html( $tax->label ); ?> (filtrowanie):
+													</p>
+													<div class="sl-term-list" style="max-height: 150px; overflow-y: auto; background: #fff; border: 1px solid #ddd; padding: 5px; border-radius: 3px;">
+														<?php
+														$terms = get_terms( [
+															'taxonomy'   => $tax->name,
+															'hide_empty' => false, // Show all categories even if empty
+														] );
+
+														if ( ! empty( $terms ) && ! is_wp_error( $terms ) ) :
+															foreach ( $terms as $term ) :
+																$field_name = "post_type_terms[{$pt->name}][{$tax->name}][]";
+																$saved_terms = $s['post_type_terms'][ $pt->name ][ $tax->name ] ?? [];
+																$is_checked = in_array( $term->term_id, $saved_terms );
+																?>
+																<label style="display: block; font-size: 12px; margin-bottom: 2px;">
+																	<input
+																		type="checkbox"
+																		name="<?php echo esc_attr( $field_name ); ?>"
+																		value="<?php echo esc_attr( $term->term_id ); ?>"
+																		<?php checked( $is_checked ); ?>
+																	/>
+																	<?php echo esc_html( $term->name ) . ' (' . intval( $term->count ) . ')'; ?>
+																</label>
+															<?php endforeach; ?>
+														<?php else : ?>
+															<span style="font-size: 11px; color: #999;">Brak kategorii.</span>
+														<?php endif; ?>
+													</div>
+													<p style="margin: 2px 0 0; font-size: 10px; color: #888;">
+														Brak zaznaczenia = uwzględnij wszystkie z <em><?php echo esc_html( $tax->label ); ?></em>.
+													</p>
+												</div>
+											<?php endforeach; ?>
+										<?php else : ?>
+											<p style="margin: 5px 0; font-size: 11px; color: #999;">Brak taksonomii hierarchicznych (kategorii) dla tego typu.</p>
+										<?php endif; ?>
+									</div>
+								</div>
 							<?php endforeach; ?>
 						</div>
 						<p class="description">
